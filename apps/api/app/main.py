@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.routers import auth, billing, faqs, personas, products, scripts, sessions, shops, tts, webhooks
+from app.routers import analytics, auth, billing, faqs, personas, products, scripts, sessions, shops, tts, webhooks
 from app.ws.handler import websocket_endpoint as ws_handler
 
 app = FastAPI(
@@ -30,6 +30,7 @@ app.include_router(sessions.router, prefix=api_prefix)
 app.include_router(scripts.router, prefix=api_prefix)
 app.include_router(billing.router, prefix=api_prefix)
 app.include_router(tts.router, prefix=api_prefix)
+app.include_router(analytics.router, prefix=api_prefix)
 app.include_router(webhooks.router, prefix=api_prefix)
 
 
