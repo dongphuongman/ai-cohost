@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_DB: cohost_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../docker/init-extensions.sql:/docker-entrypoint-initdb.d/01-extensions.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  adminer:
+    image: adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mailhog:
+    image: mailhog/mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  pgdata:
+  redisdata:

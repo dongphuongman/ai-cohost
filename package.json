@@ -1,0 +1,19 @@
+{
+  "name": "ai-cohost",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @ai-cohost/dashboard dev",
+    "dev:ext": "pnpm --filter @ai-cohost/extension dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "lint:py": "cd apps/api && uv run ruff check . && cd ../workers && uv run ruff check .",
+    "type-check": "pnpm -r type-check",
+    "test": "pnpm -r test",
+    "test:py": "cd apps/api && uv run pytest && cd ../workers && uv run pytest"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.15.4"
+}
