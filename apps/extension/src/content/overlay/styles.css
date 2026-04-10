@@ -1,0 +1,225 @@
+#ai-cohost-overlay {
+  position: fixed;
+  z-index: 2147483647;
+  width: 380px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  color: #1a1a2e;
+  user-select: none;
+}
+
+.aco-panel {
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+  border: 1px solid rgba(91, 71, 224, 0.15);
+}
+
+/* Header */
+.aco-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, #5B47E0, #7C6CF0);
+  color: #fff;
+  cursor: grab;
+}
+.aco-header:active { cursor: grabbing; }
+
+.aco-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.aco-logo {
+  font-weight: 700;
+  font-size: 15px;
+}
+.aco-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #10B981;
+  animation: aco-pulse 1.5s ease-in-out infinite;
+}
+@keyframes aco-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.aco-header-actions {
+  display: flex;
+  gap: 6px;
+}
+.aco-header-btn {
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  color: #fff;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: background 0.15s;
+}
+.aco-header-btn:hover { background: rgba(255, 255, 255, 0.3); }
+
+/* Stats strip */
+.aco-stats {
+  display: flex;
+  justify-content: space-around;
+  padding: 8px 14px;
+  background: #f8f7ff;
+  border-bottom: 1px solid #e8e5f5;
+  font-size: 12px;
+  color: #6b6b8a;
+}
+.aco-stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.aco-stat-value {
+  font-weight: 600;
+  font-size: 16px;
+  color: #1a1a2e;
+}
+
+/* Suggestion card */
+.aco-suggestion {
+  padding: 14px;
+  border-bottom: 1px solid #eee;
+}
+.aco-comment-display {
+  background: #f5f5f7;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+.aco-comment-user {
+  font-weight: 600;
+  font-size: 12px;
+  color: #5B47E0;
+  margin-bottom: 4px;
+}
+.aco-comment-text {
+  font-size: 13px;
+  color: #333;
+  line-height: 1.4;
+}
+
+.aco-reply-preview {
+  background: #f0eeff;
+  border: 1px solid #d4cff7;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #1a1a2e;
+  white-space: pre-wrap;
+}
+.aco-reply-preview[contenteditable="true"] {
+  outline: none;
+  border-color: #5B47E0;
+  background: #fff;
+}
+
+.aco-actions {
+  display: flex;
+  gap: 8px;
+}
+.aco-btn {
+  flex: 1;
+  padding: 8px 0;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.aco-btn-primary {
+  background: #5B47E0;
+  color: #fff;
+}
+.aco-btn-primary:hover { background: #4a37d0; }
+.aco-btn-secondary {
+  background: #f0eeff;
+  color: #5B47E0;
+}
+.aco-btn-secondary:hover { background: #e2deff; }
+
+/* Shortcut hints */
+.aco-shortcut {
+  font-size: 10px;
+  opacity: 0.7;
+  margin-left: 4px;
+}
+
+/* History list */
+.aco-history {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 8px 14px;
+}
+.aco-history-empty {
+  text-align: center;
+  padding: 16px;
+  color: #999;
+  font-size: 13px;
+}
+.aco-history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 12px;
+}
+.aco-history-item:last-child { border-bottom: none; }
+.aco-history-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #555;
+}
+.aco-history-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.aco-badge-sent { background: #d1fae5; color: #065f46; }
+.aco-badge-read { background: #dbeafe; color: #1e40af; }
+.aco-badge-dismissed { background: #f3f4f6; color: #6b7280; }
+.aco-badge-edited { background: #fef3c7; color: #92400e; }
+.aco-badge-pasted_not_sent { background: #fde68a; color: #78350f; }
+
+/* Session controls */
+.aco-session-controls {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid #eee;
+}
+
+/* Collapsed state */
+.aco-collapsed .aco-suggestion,
+.aco-collapsed .aco-history,
+.aco-collapsed .aco-session-controls {
+  display: none;
+}
+
+/* Scrollbar */
+.aco-history::-webkit-scrollbar { width: 4px; }
+.aco-history::-webkit-scrollbar-track { background: transparent; }
+.aco-history::-webkit-scrollbar-thumb { background: #ccc; border-radius: 2px; }
