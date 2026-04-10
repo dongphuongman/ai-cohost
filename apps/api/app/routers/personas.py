@@ -1,28 +1,135 @@
-from fastapi import APIRouter
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth.dependencies import ShopContext, get_current_shop
+from app.core.database import get_db
+from app.models.content import Persona
+from app.schemas.products import PersonaCreate, PersonaResponse, PersonaUpdate
 
 router = APIRouter(prefix="/personas", tags=["personas"])
 
 
-@router.get("/")
-async def list_personas():
-    return []
+@router.get("/", response_model=list[PersonaResponse])
+async def list_personas(
+    shop: ShopContext = Depends(get_current_shop),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Persona)
+        .where(Persona.shop_id == shop.shop_id)
+        .order_by(Persona.is_default.desc(), Persona.created_at.asc())
+    )
+    return result.scalars().all()
 
 
-@router.post("/")
-async def create_persona():
-    return {"message": "create persona endpoint"}
+@router.post("/", response_model=PersonaResponse, status_code=201)
+async def create_persona(
+    data: PersonaCreate,
+    shop: ShopContext = Depends(get_current_shop),
+    db: AsyncSession = Depends(get_db),
+):
+    persona = Persona(
+        shop_id=shop.shop_id,
+        name=data.name,
+        description=data.description,
+        tone=data.tone,
+        quirks=data.quirks,
+        sample_phrases=data.sample_phrases,
+    )
+    db.add(persona)
+    await db.commit()
+    await db.refresh(persona)
+    return persona
 
 
-@router.get("/{persona_id}")
-async def get_persona(persona_id: int):
-    return {"id": persona_id}
+@router.get("/{persona_id}", response_model=PersonaResponse)
+async def get_persona(
+    persona_id: int,
+    shop: ShopContext = Depends(get_current_shop),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Persona).where(Persona.id == persona_id, Persona.shop_id == shop.shop_id)
+    )
+    persona = result.scalar_one_or_none()
+    if not persona:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona không tồn tại")
+    return persona
 
 
-@router.patch("/{persona_id}")
-async def update_persona(persona_id: int):
-    return {"id": persona_id}
+@router.patch("/{persona_id}", response_model=PersonaResponse)
+async def update_persona(
+    persona_id: int,
+    data: PersonaUpdate,
+    shop: ShopContext = Depends(get_current_shop),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Persona).where(Persona.id == persona_id, Persona.shop_id == shop.shop_id)
+    )
+    persona = result.scalar_one_or_none()
+    if not persona:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona không tồn tại")
+
+    update_data = data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(persona, field, value)
+    persona.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(persona)
+    return persona
 
 
-@router.delete("/{persona_id}")
-async def delete_persona(persona_id: int):
-    return {"message": "deleted"}
+@router.delete("/{persona_id}", status_code=204)
+async def delete_persona(
+    persona_id: int,
+    shop: ShopContext = Depends(get_current_shop),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Persona).where(Persona.id == persona_id, Persona.shop_id == shop.shop_id)
+    )
+    persona = result.scalar_one_or_none()
+    if not persona:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona không tồn tại")
+    if persona.is_preset:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Không thể xóa persona preset",
+        )
+
+    await db.delete(persona)
+    await db.commit()
+
+
+@router.patch("/{persona_id}/default", response_model=PersonaResponse)
+async def set_default_persona(
+    persona_id: int,
+    shop: ShopContext = Depends(get_current_shop),
+    db: AsyncSession = Depends(get_db),
+):
+    # Unset current default
+    result = await db.execute(
+        select(Persona).where(Persona.shop_id == shop.shop_id, Persona.is_default.is_(True))
+    )
+    for p in result.scalars().all():
+        p.is_default = False
+
+    # Set new default
+    result = await db.execute(
+        select(Persona).where(Persona.id == persona_id, Persona.shop_id == shop.shop_id)
+    )
+    persona = result.scalar_one_or_none()
+    if not persona:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona không tồn tại")
+
+    persona.is_default = True
+    persona.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(persona)
+    return persona
