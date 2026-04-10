@@ -2,6 +2,23 @@
 
 All notable changes to AI Co-host will be documented in this file.
 
+## [0.0.3.0] - 2026-04-10
+
+### Added
+- Dashboard analytics API: overview stats (live hours, comments, used rate, scripts count), session list with pagination and filtering, session detail drill-down
+- Comments-per-minute chart endpoint with date_trunc bucketing
+- Product mentions endpoint using LATERAL unnest on suggestion RAG product IDs
+- Top questions endpoint filtered by intent category
+- Comments with latest suggestion via LEFT JOIN LATERAL pattern
+- CSV export endpoint with Vietnamese headers and StreamingResponse
+- Monthly usage summary with per-plan quota meters
+- 24 unit tests covering business logic, all 10 Pydantic schemas, CSV format, and chart bucketing
+
+### Fixed
+- Defense-in-depth: all analytics session sub-queries now enforce shop_id at the data layer, not just the router auth check
+- Cross-tenant product leak: added shop_id filter on products table join in product mentions query
+- Usage summary period parameter now auto-normalizes to first-of-month
+
 ## [0.0.2.0] - 2026-04-10
 
 ### Added
