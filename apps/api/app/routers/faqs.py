@@ -55,7 +55,7 @@ async def update_faq(
     shop: ShopContext = Depends(get_current_shop),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await faq_svc.update_faq(db, shop.shop_id, faq_id, data)
+    result = await faq_svc.update_faq(db, shop.shop_id, product_id, faq_id, data)
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="FAQ không tồn tại")
     return result
@@ -68,5 +68,5 @@ async def delete_faq(
     shop: ShopContext = Depends(get_current_shop),
     db: AsyncSession = Depends(get_db),
 ):
-    if not await faq_svc.delete_faq(db, shop.shop_id, faq_id):
+    if not await faq_svc.delete_faq(db, shop.shop_id, product_id, faq_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="FAQ không tồn tại")

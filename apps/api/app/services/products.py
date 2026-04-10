@@ -48,7 +48,8 @@ async def list_products(
     base = select(Product).where(Product.shop_id == shop_id)
 
     if search:
-        base = base.where(Product.name.ilike(f"%{search}%"))
+        escaped = search.replace("%", r"\%").replace("_", r"\_")
+        base = base.where(Product.name.ilike(f"%{escaped}%"))
 
     if status_filter == "ready":
         base = base.where(Product.embedding.isnot(None))
@@ -151,6 +152,12 @@ async def update_product(
         setattr(product, field, value)
 
     product.updated_at = datetime.now(timezone.utc)
+
+    # Remove from RAG index when deactivated
+    if "is_active" in update_data and not update_data["is_active"]:
+        product.embedding = None
+        product.embedding_updated_at = None
+        need_reindex = False  # no point re-indexing a deactivated product
 
     if need_reindex:
         product.embedding = None

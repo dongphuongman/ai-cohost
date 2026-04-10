@@ -110,10 +110,14 @@ async def create_faqs_bulk(
 
 
 async def update_faq(
-    db: AsyncSession, shop_id: int, faq_id: int, data: FaqUpdate
+    db: AsyncSession, shop_id: int, product_id: int, faq_id: int, data: FaqUpdate
 ) -> FaqResponse | None:
     result = await db.execute(
-        select(ProductFaq).where(ProductFaq.id == faq_id, ProductFaq.shop_id == shop_id)
+        select(ProductFaq).where(
+            ProductFaq.id == faq_id,
+            ProductFaq.shop_id == shop_id,
+            ProductFaq.product_id == product_id,
+        )
     )
     faq = result.scalar_one_or_none()
     if not faq:
@@ -141,9 +145,13 @@ async def update_faq(
     return _to_response(faq)
 
 
-async def delete_faq(db: AsyncSession, shop_id: int, faq_id: int) -> bool:
+async def delete_faq(db: AsyncSession, shop_id: int, product_id: int, faq_id: int) -> bool:
     result = await db.execute(
-        select(ProductFaq).where(ProductFaq.id == faq_id, ProductFaq.shop_id == shop_id)
+        select(ProductFaq).where(
+            ProductFaq.id == faq_id,
+            ProductFaq.shop_id == shop_id,
+            ProductFaq.product_id == product_id,
+        )
     )
     faq = result.scalar_one_or_none()
     if not faq:

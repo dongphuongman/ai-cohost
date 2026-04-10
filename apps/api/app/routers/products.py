@@ -126,10 +126,12 @@ async def ai_highlights(
             category=product.category,
             count=data.count,
         )
-    except Exception as e:
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("AI highlight generation failed for product %s", product_id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI generation failed: {e}",
+            detail="AI generation failed",
         )
     return AIHighlightResponse(highlights=highlights)
 
@@ -153,10 +155,12 @@ async def ai_faqs(
             price=product.price,
             count=data.count,
         )
-    except Exception as e:
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("AI FAQ generation failed for product %s", product_id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI generation failed: {e}",
+            detail="AI generation failed",
         )
     return AIFaqResponse(
         faqs=[FaqCreate(question=f["question"], answer=f["answer"], source="ai") for f in faqs_raw]

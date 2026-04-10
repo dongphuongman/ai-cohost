@@ -166,21 +166,19 @@ async def _extract_tiktok(url: str) -> dict:
     return result
 
 
+_ALLOWED_DOMAINS = {"shopee.vn", "shopee.co.th", "shopee.sg", "tiktok.com", "www.tiktok.com"}
+
+
 def _validate_url(url: str) -> bool:
-    """Reject URLs targeting internal/private networks (SSRF protection)."""
+    """Only allow known e-commerce domains (allowlist approach for SSRF protection)."""
     from urllib.parse import urlparse
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return False
-    hostname = parsed.hostname or ""
+    hostname = (parsed.hostname or "").lower()
     if not hostname:
         return False
-    # Block private/link-local/loopback
-    blocked = ("localhost", "127.", "10.", "172.16.", "192.168.", "169.254.", "0.", "[::1]")
-    for prefix in blocked:
-        if hostname.startswith(prefix):
-            return False
-    return True
+    return any(hostname == d or hostname.endswith(f".{d}") for d in _ALLOWED_DOMAINS)
 
 
 async def extract_from_url(url: str) -> dict:

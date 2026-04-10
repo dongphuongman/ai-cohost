@@ -60,3 +60,17 @@ async def enqueue_faq_embedding(faq_id: int) -> None:
         await _send_task("tasks.embed.embed_faq", [faq_id])
     except Exception:
         logger.exception("Failed to enqueue embed_faq for %s", faq_id)
+
+
+async def enqueue_suggestion_task(
+    comment_id: int, session_id: int, shop_id: int
+) -> None:
+    """Enqueue LLM suggestion generation on the llm_queue (high priority)."""
+    try:
+        await _send_task(
+            "tasks.llm.generate_suggestion",
+            [comment_id, session_id, shop_id],
+            queue="llm_queue",
+        )
+    except Exception:
+        logger.exception("Failed to enqueue suggestion for comment %s", comment_id)

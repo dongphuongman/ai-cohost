@@ -112,14 +112,7 @@ async def set_default_persona(
     shop: ShopContext = Depends(get_current_shop),
     db: AsyncSession = Depends(get_db),
 ):
-    # Unset current default
-    result = await db.execute(
-        select(Persona).where(Persona.shop_id == shop.shop_id, Persona.is_default.is_(True))
-    )
-    for p in result.scalars().all():
-        p.is_default = False
-
-    # Set new default
+    # Verify target exists
     result = await db.execute(
         select(Persona).where(Persona.id == persona_id, Persona.shop_id == shop.shop_id)
     )
@@ -127,8 +120,13 @@ async def set_default_persona(
     if not persona:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona không tồn tại")
 
-    persona.is_default = True
-    persona.updated_at = datetime.now(timezone.utc)
+    # Atomic: unset all defaults and set new one in single UPDATE
+    from sqlalchemy import update
+    await db.execute(
+        update(Persona)
+        .where(Persona.shop_id == shop.shop_id)
+        .values(is_default=Persona.id == persona_id)
+    )
 
     await db.commit()
     await db.refresh(persona)
