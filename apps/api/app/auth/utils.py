@@ -41,6 +41,18 @@ def create_refresh_token(user_id: int) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
+def create_reset_token(user_id: int) -> str:
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(hours=1)
+    payload = {
+        "sub": str(user_id),
+        "type": "reset",
+        "iat": now,
+        "exp": expire,
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
 def decode_token(token: str) -> dict:
     """Decode and validate a JWT token. Raises JWTError on failure."""
     return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])

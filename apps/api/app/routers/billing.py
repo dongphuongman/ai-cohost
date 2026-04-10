@@ -1,10 +1,13 @@
+import logging
 from datetime import date, datetime, timezone
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import ShopContext, get_current_shop, require_role
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.billing import Invoice, Subscription, UsageLog
 from app.models.tenant import Shop
@@ -16,6 +19,10 @@ from app.schemas.billing import (
     UsageMeter,
     UsageSummaryResponse,
 )
+
+logger = logging.getLogger(__name__)
+
+LEMONSQUEEZY_API = "https://api.lemonsqueezy.com/v1"
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -129,3 +136,94 @@ async def cancel_subscription(
     await db.commit()
 
     return {"message": "Subscription sẽ hết hạn vào cuối kỳ thanh toán"}
+
+
+@router.post("/checkout")
+async def create_checkout(
+    plan: str = Query(..., pattern=r"^(starter|pro|enterprise)$"),
+    shop: ShopContext = Depends(require_role("owner")),
+):
+    if not settings.lemonsqueezy_api_key or not settings.lemonsqueezy_store_id:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Billing chưa được cấu hình",
+        )
+
+    # Map plan to LemonSqueezy variant ID (configured per environment)
+    plan_variant_map = {
+        "starter": "starter",
+        "pro": "pro",
+        "enterprise": "enterprise",
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{LEMONSQUEEZY_API}/checkouts",
+                headers={
+                    "Authorization": f"Bearer {settings.lemonsqueezy_api_key}",
+                    "Content-Type": "application/vnd.api+json",
+                    "Accept": "application/vnd.api+json",
+                },
+                json={
+                    "data": {
+                        "type": "checkouts",
+                        "attributes": {
+                            "custom_data": {"shop_id": str(shop.shop_id)},
+                            "checkout_data": {
+                                "custom": {"shop_id": str(shop.shop_id)},
+                            },
+                        },
+                        "relationships": {
+                            "store": {
+                                "data": {"type": "stores", "id": settings.lemonsqueezy_store_id}
+                            },
+                            "variant": {
+                                "data": {
+                                    "type": "variants",
+                                    "id": plan_variant_map[plan],
+                                }
+                            },
+                        },
+                    }
+                },
+                timeout=15.0,
+            )
+            if resp.status_code >= 400:
+                logger.error("LemonSqueezy checkout error: %s", resp.text)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Không thể tạo checkout",
+                )
+            data = resp.json()
+            checkout_url = data["data"]["attributes"]["url"]
+            return {"checkout_url": checkout_url}
+    except httpx.HTTPError as e:
+        logger.error("LemonSqueezy API error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Không thể kết nối đến billing provider",
+        )
+
+
+@router.post("/portal")
+async def billing_portal(
+    shop: ShopContext = Depends(require_role("owner")),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Subscription.provider_customer_id).where(
+            Subscription.shop_id == shop.shop_id,
+            Subscription.provider == "lemonsqueezy",
+        )
+    )
+    customer_id = result.scalar_one_or_none()
+    if not customer_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chưa có subscription. Vui lòng đăng ký gói trước.",
+        )
+
+    # LemonSqueezy customer portal URL pattern
+    portal_url = f"https://app.lemonsqueezy.com/my-orders"
+    return {"portal_url": portal_url}
