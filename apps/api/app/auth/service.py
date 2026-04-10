@@ -107,6 +107,12 @@ async def login(db: AsyncSession, email: str, password: str) -> TokenResponse:
             detail="Email hoặc mật khẩu không đúng",
         )
 
+    if not user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email chưa được xác thực. Vui lòng kiểm tra email để lấy mã OTP.",
+        )
+
     user.last_login_at = datetime.now(timezone.utc)
     await db.commit()
 
@@ -327,6 +333,20 @@ async def google_oauth(db: AsyncSession, credential: str) -> TokenResponse:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Không thể xác thực với Google",
+        )
+
+    # Validate audience claim matches our Google client ID
+    if settings.google_client_id and google_data.get("aud") != settings.google_client_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Google token không hợp lệ cho ứng dụng này",
+        )
+
+    # Reject tokens where Google hasn't verified the email
+    if not google_data.get("email_verified", "false") == "true":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email từ Google chưa được xác thực",
         )
 
     email = google_data.get("email")

@@ -43,7 +43,11 @@ async def signup_endpoint(data: SignupRequest, request: Request, db: AsyncSessio
 
 
 @router.post("/verify-email", response_model=TokenResponse)
-async def verify_email_endpoint(data: VerifyEmailRequest, db: AsyncSession = Depends(get_db)):
+async def verify_email_endpoint(
+    data: VerifyEmailRequest, request: Request, db: AsyncSession = Depends(get_db)
+):
+    await rate_limit_by_ip(request, "verify_email", max_requests=5, window_seconds=600)
+    await rate_limit_by_user(data.user_id, "verify_email", max_requests=5, window_seconds=600)
     return await verify_email(db, data.user_id, data.otp)
 
 
