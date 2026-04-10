@@ -21,8 +21,15 @@ class Settings(BaseSettings):
     embedding_model: str = "gemini-text-embedding-004"
     embedding_dimension: int = 768
 
+    resend_api_key: str = ""
+    email_from: str = "AI Co-host <noreply@aicohost.vn>"
+
     lemonsqueezy_api_key: str = ""
     lemonsqueezy_webhook_secret: str = ""
+    lemonsqueezy_store_id: str = ""
+
+    google_client_id: str = ""
+    google_client_secret: str = ""
 
     sentry_dsn: str = ""
 

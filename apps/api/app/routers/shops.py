@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import CurrentUser, ShopContext, get_current_shop, get_current_user, require_role
 from app.core.database import get_db
 from app.models.tenant import Shop, ShopMember, User
+from app.services.personas import create_preset_personas
+from app.services.usage import check_seat_limit
 from app.schemas.shops import (
     CreateShopRequest,
     InviteMemberRequest,
@@ -71,6 +73,10 @@ async def create_shop(
         status="active",
     )
     db.add(membership)
+
+    # Create 4 preset personas for the new shop
+    await create_preset_personas(db, shop.id)
+
     await db.commit()
     await db.refresh(shop)
     return shop
@@ -146,6 +152,14 @@ async def invite_member(
     shop: ShopContext = Depends(require_role("owner", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
+    # Check seat limit
+    quota = await check_seat_limit(db, shop.shop_id)
+    if quota.exceeded:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Đã đạt giới hạn {quota.limit} thành viên cho plan hiện tại. Vui lòng nâng cấp.",
+        )
+
     # Find user by email
     result = await db.execute(select(User).where(User.email == data.email))
     target_user = result.scalar_one_or_none()

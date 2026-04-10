@@ -1,30 +1,61 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import CurrentUser, get_current_user
-from app.auth.service import change_password, get_me, login, refresh, signup, update_profile
+from app.auth.service import (
+    change_password,
+    forgot_password,
+    get_me,
+    google_oauth,
+    login,
+    refresh,
+    resend_otp,
+    reset_password,
+    signup,
+    update_profile,
+    verify_email,
+)
 from app.core.database import get_db
 from app.schemas.auth import (
     ChangePasswordRequest,
+    ForgotPasswordRequest,
+    GoogleOAuthRequest,
     LoginRequest,
     MeResponse,
     RefreshRequest,
+    ResendOtpRequest,
+    ResetPasswordRequest,
     SignupRequest,
     TokenResponse,
     UpdateProfileRequest,
     UserResponse,
+    VerifyEmailRequest,
 )
+from app.services.rate_limit import rate_limit_by_ip, rate_limit_by_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/signup", response_model=TokenResponse, status_code=201)
-async def signup_endpoint(data: SignupRequest, db: AsyncSession = Depends(get_db)):
+@router.post("/signup", status_code=201)
+async def signup_endpoint(data: SignupRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await rate_limit_by_ip(request, "signup", max_requests=3, window_seconds=3600)
     return await signup(db, data)
 
 
+@router.post("/verify-email", response_model=TokenResponse)
+async def verify_email_endpoint(data: VerifyEmailRequest, db: AsyncSession = Depends(get_db)):
+    return await verify_email(db, data.user_id, data.otp)
+
+
+@router.post("/resend-otp")
+async def resend_otp_endpoint(data: ResendOtpRequest, db: AsyncSession = Depends(get_db)):
+    await rate_limit_by_user(data.user_id, "resend_otp", max_requests=3, window_seconds=600)
+    return await resend_otp(db, data.user_id)
+
+
 @router.post("/login", response_model=TokenResponse)
-async def login_endpoint(data: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login_endpoint(data: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await rate_limit_by_ip(request, "login", max_requests=5, window_seconds=60)
     return await login(db, data.email, data.password)
 
 
@@ -33,9 +64,26 @@ async def refresh_endpoint(data: RefreshRequest, db: AsyncSession = Depends(get_
     return await refresh(db, data.refresh_token)
 
 
+@router.post("/forgot-password")
+async def forgot_password_endpoint(
+    data: ForgotPasswordRequest, request: Request, db: AsyncSession = Depends(get_db)
+):
+    await rate_limit_by_ip(request, "forgot_password", max_requests=3, window_seconds=3600)
+    return await forgot_password(db, data.email)
+
+
+@router.post("/reset-password")
+async def reset_password_endpoint(data: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    return await reset_password(db, data.token, data.new_password)
+
+
+@router.post("/google", response_model=TokenResponse)
+async def google_oauth_endpoint(data: GoogleOAuthRequest, db: AsyncSession = Depends(get_db)):
+    return await google_oauth(db, data.credential)
+
+
 @router.post("/logout")
 async def logout_endpoint(user: CurrentUser = Depends(get_current_user)):
-    # Stateless JWT — client discards tokens. Server-side blocklist can be added via Redis later.
     return {"message": "Đăng xuất thành công"}
 
 
