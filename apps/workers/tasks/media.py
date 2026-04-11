@@ -9,7 +9,12 @@ def generate_tts(suggestion_id: int, text: str, voice_id: str | None = None) -> 
 
 @app.task(name="tasks.media.generate_dh_video")
 def generate_dh_video(video_id: int) -> dict:
-    """Generate digital human video via HeyGen."""
+    """Generate digital human video via HeyGen.
+
+    NOTE: When implemented, the output video MUST include a visible
+    'Nội dung tạo bởi AI' (AI-generated) watermark overlay to comply
+    with Vietnamese regulations on synthetic media.
+    """
     return {"status": "not_implemented", "video_id": video_id}
 
 

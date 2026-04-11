@@ -17,12 +17,14 @@ from app.models.tenant import Shop
 _redis = aioredis.from_url(settings.redis_url if hasattr(settings, 'redis_url') else "redis://localhost:6379/0")
 
 
-async def _redis_check_event(event_id: str) -> bool:
-    return await _redis.exists(f"webhook_event:{event_id}")
+EVENT_DEDUP_TTL = 86400  # 24 hours
 
 
-async def _redis_mark_event(event_id: str) -> None:
-    await _redis.setex(f"webhook_event:{event_id}", 86400, "1")
+async def _redis_claim_event(event_id: str) -> bool:
+    """Atomically claim an event for processing. Returns True if this is the first claim."""
+    key = f"webhook_event:{event_id}"
+    was_new = await _redis.set(key, "1", nx=True, ex=EVENT_DEDUP_TTL)
+    return was_new is not None
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 logger = logging.getLogger(__name__)
@@ -46,18 +48,18 @@ async def lemonsqueezy_webhook(request: Request):
     if not _verify_signature(payload, signature, settings.lemonsqueezy_webhook_secret):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid signature",
+            detail="Chữ ký không hợp lệ",
         )
 
     data = json.loads(payload)
     event_name = data.get("meta", {}).get("event_name", "")
     attrs = data.get("data", {}).get("attributes", {})
 
-    # Idempotency: check event_id to avoid duplicate processing
+    # Idempotency: atomically claim event_id before processing (SETNX)
     event_id = data.get("meta", {}).get("event_id", "")
     if event_id:
-        already = await _redis_check_event(event_id)
-        if already:
+        claimed = await _redis_claim_event(event_id)
+        if not claimed:
             logger.info("Duplicate event %s, skipping", event_id)
             return {"status": "ok", "duplicate": True}
 
@@ -72,10 +74,6 @@ async def lemonsqueezy_webhook(request: Request):
             await _handle_invoice(db, event_name, attrs)
         else:
             logger.info("Unhandled LemonSqueezy event: %s", event_name)
-
-    # Mark event as processed (24h TTL)
-    if event_id:
-        await _redis_mark_event(event_id)
 
     return {"status": "ok"}
 

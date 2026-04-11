@@ -131,7 +131,7 @@ async def ai_highlights(
         logging.getLogger(__name__).exception("AI highlight generation failed for product %s", product_id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="AI generation failed",
+            detail="Tạo nội dung AI thất bại, vui lòng thử lại",
         )
     return AIHighlightResponse(highlights=highlights)
 
@@ -160,7 +160,7 @@ async def ai_faqs(
         logging.getLogger(__name__).exception("AI FAQ generation failed for product %s", product_id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="AI generation failed",
+            detail="Tạo nội dung AI thất bại, vui lòng thử lại",
         )
     return AIFaqResponse(
         faqs=[FaqCreate(question=f["question"], answer=f["answer"], source="ai") for f in faqs_raw]
