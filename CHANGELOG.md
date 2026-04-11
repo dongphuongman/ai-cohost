@@ -2,6 +2,28 @@
 
 All notable changes to AI Co-host will be documented in this file.
 
+## [0.0.4.0] - 2026-04-11
+
+### Added
+- Shop config endpoint returning industry, platform, and team size options for onboarding forms
+- Production settings validator: fail-fast on default JWT_SECRET in non-development environments
+- Extension test infrastructure: vitest config and adapter/constants test suites
+- Test coverage for config validation, product schema HTML sanitization, and reset token JTI
+
+### Fixed
+- Refresh token replay attack: JTI rotation ensures each refresh token can only be used once
+- Password reset link reuse: reset tokens now enforce single-use via JTI consumption
+- CORS wildcard for extensions: restricted to specific extension ID instead of `chrome-extension://*`
+- Google OAuth bypass when client ID unconfigured: now returns 503 instead of silently skipping validation
+- PDF export SSRF: blocked external URL fetching in WeasyPrint renderer
+- PDF export blocking: moved rendering to thread pool via `asyncio.to_thread()`
+- Script title XSS in PDF export: HTML-escaped title before embedding in template
+- Prompt injection in script generation: user notes wrapped in XML delimiters with explicit data-only instruction
+- Redundant string replacement in worker sync DB URL construction
+
+### Changed
+- `extension_id` config field added to Settings for explicit CORS origin matching
+
 ## [0.0.3.0] - 2026-04-10
 
 ### Added
