@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 
 import redis.asyncio as aioredis
 from fastapi import WebSocket, WebSocketDisconnect, Query
@@ -16,6 +17,19 @@ from app.services.embed_client import enqueue_suggestion_task
 logger = logging.getLogger(__name__)
 
 _redis = aioredis.from_url(settings.redis_url)
+
+
+_WS_COMMENT_RATE_LIMIT = 30  # max comments per minute per shop
+_WS_COMMENT_RATE_WINDOW = 60  # seconds
+
+
+async def _check_ws_rate_limit(shop_id: int) -> bool:
+    """Return True if within rate limit, False if exceeded."""
+    key = f"ws_rate:{shop_id}:{int(time.time()) // _WS_COMMENT_RATE_WINDOW}"
+    count = await _redis.incr(key)
+    if count == 1:
+        await _redis.expire(key, _WS_COMMENT_RATE_WINDOW + 5)
+    return count <= _WS_COMMENT_RATE_LIMIT
 
 
 def _cache_key(shop_id: int, comment_text: str) -> str:
@@ -119,6 +133,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         "type": "error",
                         "code": "no_session",
                         "message": "Chưa có session đang chạy",
+                    })
+                    continue
+
+                # Rate limit: max 30 comments/min per shop
+                if not await _check_ws_rate_limit(state.shop_id):
+                    await websocket.send_json({
+                        "type": "error",
+                        "code": "RATE_LIMITED",
+                        "message": "Quá nhiều comment. Tối đa 30 gợi ý/phút.",
                     })
                     continue
 

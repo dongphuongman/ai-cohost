@@ -1,5 +1,6 @@
-export const API_URL = "http://localhost:8000/api/v1";
-export const WS_URL = "ws://localhost:8000/ws";
+export const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000/api/v1";
+export const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:8000/ws";
+export const DASHBOARD_URL = import.meta.env.VITE_DASHBOARD_URL ?? "http://localhost:3000";
 
 export const STORAGE_KEYS = {
   AUTH_TOKEN: "authToken",

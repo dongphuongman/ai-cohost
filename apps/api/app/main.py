@@ -1,9 +1,17 @@
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.routers import analytics, auth, billing, faqs, personas, products, scripts, sessions, shops, tts, webhooks
 from app.ws.handler import websocket_endpoint as ws_handler
+
+if settings.sentry_dsn:
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        traces_sample_rate=0.1,
+        environment=settings.app_env,
+    )
 
 app = FastAPI(
     title="AI Co-host API",
