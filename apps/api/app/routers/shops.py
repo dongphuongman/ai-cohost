@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import CurrentUser, ShopContext, get_current_shop, get_current_user, require_role
 from app.core.database import get_db
 from app.models.tenant import Shop, ShopMember, User
+from app.services.email import send_invite_email
 from app.services.personas import create_preset_personas
 from app.services.usage import check_seat_limit
 from app.schemas.shops import (
@@ -193,6 +194,16 @@ async def invite_member(
     db.add(member)
     await db.commit()
     await db.refresh(member)
+
+    # Send invite notification email (best-effort, don't fail on email error)
+    inviter = await db.get(User, shop.user_id)
+    shop_row = await db.get(Shop, shop.shop_id)
+    if inviter and shop_row:
+        await send_invite_email(
+            to=target_user.email,
+            shop_name=shop_row.name,
+            inviter_name=inviter.full_name or inviter.email,
+        )
 
     return ShopMemberResponse(
         id=member.id,
