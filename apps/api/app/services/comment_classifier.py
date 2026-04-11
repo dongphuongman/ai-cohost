@@ -12,7 +12,14 @@ import redis.asyncio as aioredis
 
 from app.core.config import settings
 
-_redis = aioredis.from_url(settings.redis_url)
+_redis: aioredis.Redis | None = None
+
+
+def _get_redis() -> aioredis.Redis:
+    global _redis
+    if _redis is None:
+        _redis = aioredis.from_url(settings.redis_url)
+    return _redis
 
 
 @dataclass
@@ -225,10 +232,11 @@ _VALID_INTENTS = frozenset(_INTENT_ACTION_MAP.keys())
 
 async def _check_llm_rate(shop_id: int, limit: int) -> bool:
     """Rate limit LLM classify calls: max `limit` per minute per shop."""
+    r = _get_redis()
     key = f"llm_classify_rate:{shop_id}:{int(time.time()) // 60}"
-    count = await _redis.incr(key)
+    count = await r.incr(key)
     if count == 1:
-        await _redis.expire(key, 65)
+        await r.expire(key, 65)
     return count <= limit
 
 

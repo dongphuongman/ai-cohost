@@ -121,7 +121,7 @@ def generate_dh_video(video_id: int) -> dict:
     """
     import os
     import time
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     with Session(_sync_engine) as session:
         video = _get_video(session, video_id)
@@ -217,7 +217,7 @@ def generate_dh_video(video_id: int) -> dict:
                     stored_url = f"storage://{video_key}"
 
                     # 7. Update DB
-                    now = datetime.utcnow()
+                    now = datetime.now(timezone.utc)
                     _update_video(
                         session,
                         video_id,
@@ -251,11 +251,11 @@ def generate_dh_video(video_id: int) -> dict:
 
             raise RuntimeError("HeyGen processing timeout after 10 minutes")
 
-        except Exception:
+        except Exception as exc:
             logger.exception("DH video %d failed", video_id)
 
-            error_text = str(Exception)[:500] if Exception else "Unknown error"
-            _update_video(session, video_id, status="failed")
+            error_text = str(exc)[:500]
+            _update_video(session, video_id, status="failed", error_message=error_text)
 
             _redis_client.publish(
                 f"notifications:{shop_id}",

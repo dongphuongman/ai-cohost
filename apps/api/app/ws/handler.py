@@ -8,7 +8,7 @@ import redis.asyncio as aioredis
 from fastapi import WebSocket, WebSocketDisconnect, Query
 from jose import JWTError
 
-from sqlalchemy import select
+from sqlalchemy import select, update as sa_update
 
 from app.auth.utils import decode_token
 from app.core.config import settings
@@ -180,10 +180,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
                 # Mark session active again if it was interrupted
                 if session.status == "interrupted":
-                    from sqlalchemy import update
                     async with async_session() as db:
                         await db.execute(
-                            update(LiveSession)
+                            sa_update(LiveSession)
                             .where(LiveSession.id == session.id)
                             .values(status="active")
                         )
