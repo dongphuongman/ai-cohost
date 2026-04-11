@@ -320,13 +320,17 @@ async def reset_password(db: AsyncSession, token: str, new_password: str) -> dic
 
     # Single-use enforcement: each reset token can only be used once
     jti = payload.get("jti")
-    if jti:
-        is_valid = await consume_refresh_jti(jti, expire_days=1)
-        if not is_valid:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Link đặt lại mật khẩu đã được sử dụng. Vui lòng yêu cầu link mới.",
-            )
+    if not jti:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reset token không hợp lệ. Vui lòng yêu cầu link mới.",
+        )
+    is_valid = await consume_refresh_jti(jti, expire_days=1)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Link đặt lại mật khẩu đã được sử dụng. Vui lòng yêu cầu link mới.",
+        )
 
     user_id = int(payload["sub"])
     result = await db.execute(select(User).where(User.id == user_id))

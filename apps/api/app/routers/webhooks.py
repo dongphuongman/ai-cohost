@@ -57,11 +57,13 @@ async def lemonsqueezy_webhook(request: Request):
 
     # Idempotency: atomically claim event_id before processing (SETNX)
     event_id = data.get("meta", {}).get("event_id", "")
-    if event_id:
-        claimed = await _redis_claim_event(event_id)
-        if not claimed:
-            logger.info("Duplicate event %s, skipping", event_id)
-            return {"status": "ok", "duplicate": True}
+    if not event_id:
+        logger.warning("Webhook missing event_id — rejecting to prevent replay")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing event_id")
+    claimed = await _redis_claim_event(event_id)
+    if not claimed:
+        logger.info("Duplicate event %s, skipping", event_id)
+        return {"status": "ok", "duplicate": True}
 
     async with async_session() as db:
         if event_name in ("subscription_created", "subscription_updated"):
