@@ -3,7 +3,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import ShopContext, get_current_shop
 from app.core.database import get_db
+from app.schemas.auto_reply import AutoReplyToggleRequest
 from app.services import sessions as session_svc
+from app.services.auto_reply import toggle_auto_reply
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -118,3 +120,24 @@ async def list_session_suggestions(
         }
         for s in suggestions
     ]
+
+
+@router.patch("/{session_uuid}/auto-reply")
+async def toggle_session_auto_reply(
+    session_uuid: str,
+    data: AutoReplyToggleRequest,
+    shop: ShopContext = Depends(get_current_shop),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle auto-reply for a running session. Requires Pro plan."""
+    try:
+        session = await toggle_auto_reply(
+            db, session_uuid, shop.shop_id, data.enabled, data.threshold,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return {
+        "session_uuid": session.uuid,
+        "auto_reply_enabled": (session.metadata_ or {}).get("auto_reply_enabled", False),
+        "auto_reply_threshold": (session.metadata_ or {}).get("auto_reply_threshold", 0.9),
+    }
