@@ -8,6 +8,7 @@ export const STORAGE_KEYS = {
   OVERLAY_POSITION: "overlayPosition",
   ONBOARDING_SEEN: "onboardingSeen",
   ACTIVE_SESSION: "activeSession",
+  ACTIVE_TAB_ID: "activeTabId",
 } as const;
 
 export const WS_PING_INTERVAL = 30_000;

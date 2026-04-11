@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     deepseek_api_key: str = ""
 
-    embedding_model: str = "gemini-text-embedding-004"
+    embedding_model: str = "gemini-embedding-001"
     embedding_dimension: int = 768
 
     resend_api_key: str = ""
@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
 
     extension_id: str = ""
+
+    elevenlabs_api_key: str = ""
+    heygen_api_key: str = ""
 
     sentry_dsn: str = ""
 

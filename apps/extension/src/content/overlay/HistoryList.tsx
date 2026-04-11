@@ -4,6 +4,7 @@ export interface HistoryEntry {
   suggestion: WSSuggestion;
   action: SuggestionAction;
   actionAt: Date;
+  flagReason?: string;
 }
 
 const BADGE_LABELS: Record<SuggestionAction, string> = {
@@ -31,12 +32,14 @@ export function HistoryList({ entries }: Props) {
     <div class="aco-history">
       {entries.map((entry) => (
         <div class="aco-history-item" key={entry.suggestion.id}>
-          <div class="aco-history-text" title={entry.suggestion.replyText}>
+          <div class="aco-history-text" title={entry.flagReason || entry.suggestion.replyText}>
             <strong>{entry.suggestion.originalComment.externalUserName}:</strong>{' '}
-            {entry.suggestion.replyText}
+            {entry.flagReason
+              ? entry.suggestion.originalComment.text
+              : entry.suggestion.replyText}
           </div>
-          <span class={`aco-history-badge aco-badge-${entry.action}`}>
-            {BADGE_LABELS[entry.action]}
+          <span class={`aco-history-badge ${entry.flagReason ? 'aco-badge-flagged' : `aco-badge-${entry.action}`}`}>
+            {entry.flagReason ? 'Cần duyệt' : BADGE_LABELS[entry.action]}
           </span>
         </div>
       ))}

@@ -5,6 +5,15 @@ import manifest from "./manifest.json";
 
 export default defineConfig({
   plugins: [preact(), crx({ manifest })],
+  server: {
+    port: 5174,
+    strictPort: true,
+    host: true,
+    cors: true,
+    hmr: {
+      port: 5174,
+    },
+  },
   resolve: {
     alias: {
       "@": "/src",

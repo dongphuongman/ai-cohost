@@ -84,11 +84,12 @@ def _classify_intent(text_: str) -> tuple[str, float]:
 
 
 def _get_embedding(content: str, task_type: str = "RETRIEVAL_QUERY") -> list[float]:
-    genai.configure(api_key=settings.gemini_api_key)
+    genai.configure(api_key=settings.gemini_api_key, transport="rest")
     result = genai.embed_content(
-        model="models/text-embedding-004",
+        model="models/gemini-embedding-001",
         content=content,
         task_type=task_type,
+        output_dimensionality=768,
     )
     return result["embedding"]
 
@@ -98,23 +99,23 @@ def _get_embedding(content: str, task_type: str = "RETRIEVAL_QUERY") -> list[flo
 RAG_QUERY = text("""
 WITH relevant_products AS (
     SELECT id, name, description, highlights, price, currency,
-           1 - (embedding <=> :embedding::vector) AS similarity
+           1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
     FROM products
     WHERE shop_id = :shop_id
       AND is_active = true
-      AND id = ANY(:product_ids::bigint[])
+      AND id = ANY(CAST(:product_ids AS bigint[]))
       AND embedding IS NOT NULL
-    ORDER BY embedding <=> :embedding::vector
+    ORDER BY embedding <=> CAST(:embedding AS vector)
     LIMIT 2
 ),
 relevant_faqs AS (
     SELECT f.id, f.question, f.answer, f.product_id,
-           1 - (f.embedding <=> :embedding::vector) AS similarity
+           1 - (f.embedding <=> CAST(:embedding AS vector)) AS similarity
     FROM product_faqs f
     WHERE f.shop_id = :shop_id
       AND f.product_id IN (SELECT id FROM relevant_products)
       AND f.embedding IS NOT NULL
-    ORDER BY f.embedding <=> :embedding::vector
+    ORDER BY f.embedding <=> CAST(:embedding AS vector)
     LIMIT 3
 )
 SELECT
@@ -228,7 +229,7 @@ def _call_llm_with_fallback(
 
     # Provider 1: Gemini Flash
     try:
-        genai.configure(api_key=settings.gemini_api_key)
+        genai.configure(api_key=settings.gemini_api_key, transport="rest")
         model = genai.GenerativeModel("gemini-2.0-flash")
         full_response = ""
         response = model.generate_content(prompt, stream=True)
@@ -439,7 +440,7 @@ def _do_generate(comment_id: int, session_id: int, shop_id: int) -> dict:
 
         # 12. Publish completion via Redis
         _redis.publish(
-            channel,
+            f"suggestion_stream:{session_id}",
             json.dumps({
                 "type": "suggestion.complete",
                 "comment_id": comment_id,

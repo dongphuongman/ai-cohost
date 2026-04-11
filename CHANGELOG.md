@@ -2,6 +2,28 @@
 
 All notable changes to AI Co-host will be documented in this file.
 
+## [0.0.5.0] - 2026-04-12
+
+### Added
+- F7 Voice Cloning: CRUD endpoints for voice clones with audio/consent file upload, magic byte validation
+- F8 Digital Human Video: generation pipeline via HeyGen, video status tracking, paginated listing
+- F9 Auto-Reply: comment classifier (rule-based + LLM fallback), suggestion routing, WebSocket auto-reply flow with countdown UI, popup toggle, and kill switch
+- F10 Moderation: content filtering rules (blocked keywords, regex patterns), comment flagging, bulk approve/dismiss with validation
+
+### Changed
+- Voice clone and video list endpoints now support pagination (limit/offset)
+- LLM classifier runs in thread pool to avoid blocking the event loop
+- Auto-reply rate limiter persists disable state via DB commit
+- Session action counters map auto_sent and auto_cancelled to correct columns
+- Extension forwards auto_reply and auto_reply.disabled message types
+
+### Fixed
+- Regex pattern validation at write time prevents ReDoS via malicious moderation rules
+- Bulk moderation request validates comment_ids length (1-1000)
+- Audio upload validates magic bytes (MP3/WAV/M4A), consent upload validates PDF header
+- Session status values corrected (active to running) for WebSocket reconnection
+- Error capture bug, utcnow deprecation, lazy Redis init, shadowed import fixes
+
 ## [0.0.4.0] - 2026-04-11
 
 ### Added

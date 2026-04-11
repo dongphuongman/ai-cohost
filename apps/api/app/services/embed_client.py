@@ -109,6 +109,14 @@ async def enqueue_script_task(
     return task_id
 
 
+async def get_job_status(job_id: str) -> dict | None:
+    """Get job status from Redis. Returns None if not found."""
+    data = await _redis.get(f"job:{job_id}")
+    if data is None:
+        return None
+    return json.loads(data)
+
+
 async def enqueue_suggestion_task(
     comment_id: int, session_id: int, shop_id: int
 ) -> None:

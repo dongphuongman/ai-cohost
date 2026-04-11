@@ -59,19 +59,24 @@ function startSession(id: string) {
   // Start reading comments
   commentReader = new CommentReader(adapter);
 
-  // Read existing comments first
-  const existing = commentReader.readExisting();
-  for (const comment of existing) {
-    sendCommentToBackground(comment);
-  }
+  // Delay reading existing comments so the backend pub/sub listener
+  // has time to subscribe before the first LLM suggestions are published.
+  setTimeout(() => {
+    if (!commentReader || !sessionId) return;
 
-  // Then observe new ones
-  commentReader.start((comment) => {
-    sendCommentToBackground(comment);
-    dispatchOverlayEvent('comment.counted', {});
-  });
+    const existing = commentReader.readExisting();
+    for (const comment of existing) {
+      sendCommentToBackground(comment);
+    }
 
-  console.log(`[AI Co-host] Session started: ${id}`);
+    // Then observe new ones
+    commentReader.start((comment) => {
+      sendCommentToBackground(comment);
+      dispatchOverlayEvent('comment.counted', {});
+    });
+
+    console.log(`[AI Co-host] Session started: ${id}`);
+  }, 1500);
 }
 
 function endSession() {
@@ -98,6 +103,23 @@ function handleWSMessage(msg: WSServerMessage) {
   } else if (msg.type === 'suggestion.complete') {
     dispatchOverlayEvent('suggestion.complete', {
       suggestion_id: msg.suggestion_id,
+    });
+  } else if (msg.type === 'comment.hidden') {
+    dispatchOverlayEvent('comment.hidden', {
+      comment_id: msg.comment_id,
+      reason: msg.reason,
+    });
+  } else if (msg.type === 'comment.flagged') {
+    dispatchOverlayEvent('comment.flagged', {
+      comment_id: msg.comment_id,
+      comment: msg.comment,
+      reason: msg.reason,
+    });
+  } else if (msg.type === 'comment.received') {
+    dispatchOverlayEvent('comment.received', {
+      comment_id: msg.comment_id,
+      comment: msg.comment,
+      intent: msg.intent,
     });
   }
 }

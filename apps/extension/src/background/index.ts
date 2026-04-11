@@ -5,6 +5,8 @@ import {
   getActiveSession,
   saveActiveSession,
   clearActiveSession,
+  getActiveTabId,
+  saveActiveTabId,
   type ActiveSession,
 } from '@/lib/storage';
 import type { WSServerMessage } from '@/types/messages';
@@ -17,6 +19,43 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // Track which tab has the active session
 let activeTabId: number | null = null;
+
+/**
+ * Restore WS connection after MV3 service worker restart.
+ * The service worker can be killed after 30s of inactivity, losing
+ * the in-memory wsClient and activeTabId. This recovers both.
+ */
+async function ensureWSConnected(): Promise<boolean> {
+  if (wsClient.connected) return true;
+
+  const session = await getActiveSession();
+  if (!session) return false;
+
+  const token = await getAuthToken();
+  if (!token) return false;
+
+  // Restore activeTabId from storage
+  if (!activeTabId) {
+    activeTabId = await getActiveTabId();
+  }
+
+  try {
+    await wsClient.connect(token);
+    setupWSHandlers();
+
+    // Re-join the session so backend resumes sending on this WS
+    wsClient.send({
+      type: 'session.rejoin',
+      session_id: session.sessionId,
+    });
+
+    console.log('[AI Co-host] WS reconnected for session', session.sessionId);
+    return true;
+  } catch (err) {
+    console.error('[AI Co-host] WS reconnect failed:', err);
+    return false;
+  }
+}
 
 // Handle messages from popup and content scripts
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -57,6 +96,7 @@ async function handleMessage(
           products: message.productIds as number[],
           persona_id: message.personaId as number,
           platform: message.platform as string,
+          auto_reply_enabled: (message.autoReplyEnabled as boolean) ?? false,
         });
 
         // Wait for session.started response
@@ -78,6 +118,7 @@ async function handleMessage(
 
         // Tell the content script to start
         activeTabId = message.tabId as number;
+        await saveActiveTabId(activeTabId);
         chrome.tabs.sendMessage(activeTabId, {
           type: 'START_SESSION',
           sessionId: sessionStarted.session_id,
@@ -101,6 +142,7 @@ async function handleMessage(
       }
 
       case 'NEW_COMMENT': {
+        await ensureWSConnected();
         wsClient.send({
           type: 'comment.new',
           session_id: message.sessionId as string,
@@ -169,6 +211,9 @@ async function handleMessage(
 
       case 'GET_SESSION_STATUS': {
         const session = await getActiveSession();
+        if (session && !wsClient.connected) {
+          await ensureWSConnected();
+        }
         sendResponse({ session, connected: wsClient.connected });
         break;
       }
@@ -198,7 +243,12 @@ function setupWSHandlers() {
       activeTabId &&
       (msg.type === 'suggestion.new' ||
         msg.type === 'suggestion.stream' ||
-        msg.type === 'suggestion.complete')
+        msg.type === 'suggestion.complete' ||
+        msg.type === 'suggestion.auto_reply' ||
+        msg.type === 'auto_reply.disabled' ||
+        msg.type === 'comment.hidden' ||
+        msg.type === 'comment.flagged' ||
+        msg.type === 'comment.received')
     ) {
       chrome.tabs.sendMessage(activeTabId, { type: 'WS_MESSAGE', data: msg });
     }

@@ -691,9 +691,10 @@ def seed_script_samples():
             try:
                 embed_text = f"{sample['title']}. {sample['category']}. {sample['persona_style']}. {sample['content'][:500]}"
                 result = genai.embed_content(
-                    model="models/text-embedding-004",
+                    model="models/gemini-embedding-001",
                     content=embed_text,
                     task_type="RETRIEVAL_DOCUMENT",
+                    output_dimensionality=768,
                 )
                 embedding = result["embedding"]
             except Exception as e:

@@ -10,6 +10,7 @@ app.conf.update(
     result_serializer="json",
     timezone="Asia/Ho_Chi_Minh",
     enable_utc=True,
+    worker_pool="solo",
     task_routes={
         "tasks.llm.*": {"queue": "llm_queue"},
         "tasks.script.*": {"queue": "script_queue"},
@@ -20,4 +21,14 @@ app.conf.update(
     task_default_queue="llm_queue",
 )
 
-app.autodiscover_tasks(["tasks"])
+app.autodiscover_tasks(
+    ["tasks"],
+    related_name=None,
+    force=True,
+)
+# Explicit imports to ensure all task modules are registered
+import tasks.script  # noqa: F401,E402
+import tasks.embed  # noqa: F401,E402
+import tasks.llm  # noqa: F401,E402
+import tasks.media  # noqa: F401,E402
+import tasks.usage  # noqa: F401,E402

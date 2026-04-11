@@ -8,6 +8,7 @@ from app.auth.dependencies import ShopContext, get_current_shop
 from app.core.database import get_db
 from app.models.content import Persona
 from app.schemas.products import PersonaCreate, PersonaResponse, PersonaUpdate
+from app.schemas.voices import VoiceLinkRequest
 
 router = APIRouter(prefix="/personas", tags=["personas"])
 
@@ -130,4 +131,21 @@ async def set_default_persona(
 
     await db.commit()
     await db.refresh(persona)
+    return persona
+
+
+@router.patch("/{persona_id}/voice", response_model=PersonaResponse)
+async def link_voice_to_persona(
+    persona_id: int,
+    data: VoiceLinkRequest,
+    shop: ShopContext = Depends(get_current_shop),
+    db: AsyncSession = Depends(get_db),
+):
+    """Link or unlink a voice clone to a persona."""
+    from app.services.voices import link_voice_to_persona as do_link
+
+    try:
+        persona = await do_link(db, persona_id, shop.shop_id, data.voice_clone_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     return persona

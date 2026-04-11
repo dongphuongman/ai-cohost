@@ -8,10 +8,22 @@ import redis.asyncio as aioredis
 from fastapi import WebSocket, WebSocketDisconnect, Query
 from jose import JWTError
 
+from sqlalchemy import select, update as sa_update
+
 from app.auth.utils import decode_token
 from app.core.config import settings
 from app.core.database import async_session
+from app.models.session import Comment, LiveSession, Suggestion
+from app.models.tenant import Shop
 from app.services import sessions as session_svc
+from app.services import moderation as moderation_svc
+from app.services.comment_classifier import classify as classify_comment
+from app.services.auto_reply import (
+    should_auto_reply,
+    record_undo,
+    disable_auto_reply,
+    _get_redis as get_auto_reply_redis,
+)
 from app.services.embed_client import enqueue_suggestion_task
 
 logger = logging.getLogger(__name__)
@@ -127,6 +139,61 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         _listen_suggestions(websocket, state)
                     )
 
+            elif msg_type == "session.rejoin":
+                # Reconnect to an existing session (after WS drop / service worker restart)
+                session_uuid = data.get("session_id")
+                if not session_uuid:
+                    await websocket.send_json({
+                        "type": "error",
+                        "code": "missing_session_id",
+                        "message": "session_id is required",
+                    })
+                    continue
+
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(LiveSession).where(
+                            LiveSession.uuid == session_uuid,
+                            LiveSession.status.in_(["running", "interrupted"]),
+                        )
+                    )
+                    session = result.scalar_one_or_none()
+
+                if not session or session.shop_id not in state.shop_ids:
+                    await websocket.send_json({
+                        "type": "error",
+                        "code": "session_not_found",
+                        "message": "Session không tồn tại hoặc đã kết thúc",
+                    })
+                    continue
+
+                state.session_id = session.id
+                state.session_uuid = session.uuid
+                state.shop_id = session.shop_id
+
+                # Restart pub/sub listener
+                if state.pubsub_task:
+                    state.pubsub_task.cancel()
+                state.pubsub_task = asyncio.create_task(
+                    _listen_suggestions(websocket, state)
+                )
+
+                # Mark session active again if it was interrupted
+                if session.status == "interrupted":
+                    async with async_session() as db:
+                        await db.execute(
+                            sa_update(LiveSession)
+                            .where(LiveSession.id == session.id)
+                            .values(status="running")
+                        )
+                        await db.commit()
+
+                await websocket.send_json({
+                    "type": "session.rejoined",
+                    "session_id": session.uuid,
+                })
+                logger.info("WS rejoined session %s for user %s", session.uuid, state.user_id)
+
             elif msg_type == "comment.new":
                 if not state.session_id or not state.shop_id:
                     await websocket.send_json({
@@ -147,6 +214,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
                 comment_data = data.get("comment", {})
                 comment_text = comment_data.get("text", "")
+                external_user_id = comment_data.get("externalUserId")
+
+                # 1. Load shop moderation rules & classify
+                async with async_session() as db:
+                    shop_rules = await moderation_svc.get_shop_rules(db, state.shop_id)
+
+                classify_result = await classify_comment(
+                    comment_text, state.shop_id, shop_rules, external_user_id
+                )
+
+                # 2. Save comment with classification metadata
                 async with async_session() as db:
                     comment = await session_svc.ingest_comment(
                         db,
@@ -154,10 +232,47 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         shop_id=state.shop_id,
                         external_user_name=comment_data.get("externalUserName", ""),
                         text=comment_text,
-                        external_user_id=comment_data.get("externalUserId"),
+                        external_user_id=external_user_id,
+                        intent=classify_result.intent,
+                        confidence=classify_result.confidence,
+                        is_spam=(classify_result.action == "hide"),
                     )
                     await db.commit()
 
+                # 3. Act based on classification
+                if classify_result.action == "hide":
+                    await websocket.send_json({
+                        "type": "comment.hidden",
+                        "comment_id": comment.id,
+                        "reason": classify_result.reason or "Spam detected",
+                    })
+                    continue
+
+                if classify_result.action == "flag":
+                    async with async_session() as db:
+                        await moderation_svc.flag_comment(
+                            db, comment.id, state.shop_id, classify_result.reason
+                        )
+                        await db.commit()
+                    await websocket.send_json({
+                        "type": "comment.flagged",
+                        "comment_id": comment.id,
+                        "comment": comment_data,
+                        "reason": classify_result.reason or "Nội dung cần kiểm duyệt",
+                    })
+                    continue
+
+                if classify_result.action == "skip_ai":
+                    await websocket.send_json({
+                        "type": "comment.received",
+                        "comment_id": comment.id,
+                        "comment": comment_data,
+                        "intent": classify_result.intent,
+                        "skipped_reason": "Không cần gợi ý AI",
+                    })
+                    continue
+
+                # action == "generate_ai" — proceed with LLM suggestion
                 # Store comment metadata for enriching worker responses
                 state.comment_meta[comment.id] = {
                     "externalUserName": comment_data.get("externalUserName", ""),
@@ -197,7 +312,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 suggestion_id = data.get("suggestion_id")
                 action = data.get("action")
                 edited_text = data.get("edited_text")
-                _ALLOWED_ACTIONS = {"sent", "pasted_not_sent", "read", "dismissed", "edited"}
+                _ALLOWED_ACTIONS = {"sent", "pasted_not_sent", "read", "dismissed", "edited", "auto_sent", "auto_cancelled"}
                 if suggestion_id and action and action in _ALLOWED_ACTIONS:
                     try:
                         async with async_session() as db:
@@ -209,6 +324,28 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                                 edited_text=edited_text,
                             )
                             await db.commit()
+
+                            # Track undo for safety monitor
+                            if action == "auto_cancelled" and state.session_id:
+                                r = await get_auto_reply_redis()
+                                should_disable = await record_undo(r, state.session_id)
+                                if should_disable:
+                                    session_result = await db.execute(
+                                        select(LiveSession).where(
+                                            LiveSession.id == state.session_id
+                                        )
+                                    )
+                                    sess = session_result.scalar_one_or_none()
+                                    if sess:
+                                        await disable_auto_reply(
+                                            sess, r,
+                                            "Tự động tắt: bạn đã hủy nhiều auto-reply gần đây",
+                                        )
+                                        await db.commit()
+                                        await websocket.send_json({
+                                            "type": "auto_reply.disabled",
+                                            "reason": "Tự động tắt: bạn đã hủy nhiều auto-reply gần đây",
+                                        })
                     except Exception:
                         logger.debug(
                             "suggestion.action failed for %s", suggestion_id, exc_info=True
@@ -271,20 +408,70 @@ async def _listen_suggestions(websocket: WebSocket, state: WSConnectionState) ->
                     })
 
                 elif msg_type == "suggestion.complete":
-                    suggestion = data.get("suggestion", {})
+                    suggestion_data = data.get("suggestion", {})
                     comment_id = data.get("comment_id")
+                    suggestion_id = suggestion_data.get("id")
                     # Enrich with comment metadata from state
                     meta = state.comment_meta.pop(comment_id, {})
                     if meta:
-                        suggestion["originalComment"] = {
+                        suggestion_data["originalComment"] = {
                             "externalUserName": meta.get("externalUserName", ""),
                             "text": meta.get("text", ""),
                             "receivedAt": meta.get("receivedAt", ""),
                         }
-                    await websocket.send_json({
-                        "type": "suggestion.new",
-                        "suggestion": suggestion,
-                    })
+
+                    # Check auto-reply eligibility
+                    auto_reply_decision = None
+                    if state.session_id and state.shop_id and comment_id and suggestion_id:
+                        try:
+                            async with async_session() as db:
+                                comment_row = await db.execute(
+                                    select(Comment).where(Comment.id == comment_id)
+                                )
+                                comment_obj = comment_row.scalar_one_or_none()
+
+                                suggestion_row = await db.execute(
+                                    select(Suggestion).where(Suggestion.id == suggestion_id)
+                                )
+                                suggestion_obj = suggestion_row.scalar_one_or_none()
+
+                                session_row = await db.execute(
+                                    select(LiveSession).where(LiveSession.id == state.session_id)
+                                )
+                                session_obj = session_row.scalar_one_or_none()
+
+                                plan_row = await db.execute(
+                                    select(Shop.plan).where(Shop.id == state.shop_id)
+                                )
+                                shop_plan = plan_row.scalar_one_or_none() or "trial"
+
+                                if comment_obj and suggestion_obj and session_obj:
+                                    auto_reply_decision = await should_auto_reply(
+                                        comment_obj, suggestion_obj, session_obj, shop_plan,
+                                        db=db,
+                                    )
+                        except Exception:
+                            logger.debug("Auto-reply check failed", exc_info=True)
+
+                    if auto_reply_decision and auto_reply_decision.allowed:
+                        from datetime import datetime, timedelta, timezone
+                        undo_deadline = datetime.now(timezone.utc) + timedelta(seconds=15)
+                        await websocket.send_json({
+                            "type": "suggestion.auto_reply",
+                            "suggestion_id": suggestion_id,
+                            "text": suggestion_data.get("replyText", ""),
+                            "suggestion": suggestion_data,
+                            "reason": auto_reply_decision.reason,
+                            "undo_deadline": undo_deadline.isoformat(),
+                        })
+                    else:
+                        msg = {
+                            "type": "suggestion.new",
+                            "suggestion": suggestion_data,
+                        }
+                        if auto_reply_decision and not auto_reply_decision.allowed:
+                            msg["auto_reply_blocked_reason"] = auto_reply_decision.reason
+                        await websocket.send_json(msg)
 
                 elif msg_type == "suggestion.error":
                     await websocket.send_json({
