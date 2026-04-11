@@ -84,10 +84,12 @@ async def should_auto_reply(
     suggestion: Suggestion,
     session: LiveSession,
     shop_plan: str,
+    db: "AsyncSession | None" = None,
 ) -> AutoReplyDecision:
     """Decide whether a suggestion should be auto-replied.
 
     Returns AutoReplyDecision with allowed=True/False and reason.
+    Pass db session so disable_auto_reply can persist changes.
     """
     # 1. Check if auto-reply is enabled for this session
     session_meta = session.metadata_ or {}
@@ -102,8 +104,10 @@ async def should_auto_reply(
     r = await _get_redis()
     rate_ok = await check_rate_limit(r, session.id)
     if not rate_ok:
-        # Auto-disable when rate exceeded
+        # Auto-disable when rate exceeded — persist via DB if session available
         await disable_auto_reply(session, r, "Đã vượt giới hạn auto-reply")
+        if db:
+            await db.commit()
         return AutoReplyDecision(allowed=False, reason="Vượt giới hạn tần suất auto-reply")
 
     # 4. BLACKLIST CHECK (hard reject — checked before whitelist)

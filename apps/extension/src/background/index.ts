@@ -244,6 +244,8 @@ function setupWSHandlers() {
       (msg.type === 'suggestion.new' ||
         msg.type === 'suggestion.stream' ||
         msg.type === 'suggestion.complete' ||
+        msg.type === 'suggestion.auto_reply' ||
+        msg.type === 'auto_reply.disabled' ||
         msg.type === 'comment.hidden' ||
         msg.type === 'comment.flagged' ||
         msg.type === 'comment.received')

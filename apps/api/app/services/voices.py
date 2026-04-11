@@ -27,6 +27,17 @@ def _get_extension(filename: str | None) -> str:
     return filename[dot:].lower() if dot != -1 else ""
 
 
+def _check_audio_magic(data: bytes) -> bool:
+    """Check magic bytes for MP3, WAV, M4A."""
+    if data[:3] == b"ID3" or data[:2] == b"\xff\xfb" or data[:2] == b"\xff\xf3":
+        return True  # MP3
+    if data[:4] == b"RIFF":
+        return True  # WAV
+    if len(data) >= 8 and data[4:8] == b"ftyp":
+        return True  # M4A/MP4
+    return False
+
+
 async def validate_audio_file(audio: UploadFile) -> bytes:
     """Validate audio file format and size. Returns file bytes."""
     ext = _get_extension(audio.filename)
@@ -40,6 +51,9 @@ async def validate_audio_file(audio: UploadFile) -> bytes:
         raise ValueError("File âm thanh quá lớn. Giới hạn 50MB.")
     if len(content) < 1000:
         raise ValueError("File âm thanh quá nhỏ hoặc rỗng.")
+
+    if not _check_audio_magic(content):
+        raise ValueError("File không phải định dạng audio hợp lệ.")
 
     return content
 
@@ -55,6 +69,9 @@ async def validate_consent_file(consent: UploadFile) -> bytes:
         raise ValueError("File PDF quá lớn. Giới hạn 10MB.")
     if len(content) < 100:
         raise ValueError("File PDF rỗng hoặc không hợp lệ.")
+
+    if not content[:5].startswith(b"%PDF"):
+        raise ValueError("File không phải định dạng PDF hợp lệ.")
 
     return content
 
@@ -137,12 +154,14 @@ async def create_voice_clone(
 
 
 async def list_voice_clones(
-    db: AsyncSession, shop_id: int
+    db: AsyncSession, shop_id: int, limit: int = 50, offset: int = 0
 ) -> list[VoiceClone]:
     result = await db.execute(
         select(VoiceClone)
         .where(VoiceClone.shop_id == shop_id, VoiceClone.deleted_at.is_(None))
         .order_by(VoiceClone.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
     return list(result.scalars().all())
 

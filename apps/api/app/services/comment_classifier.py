@@ -109,17 +109,18 @@ def classify_rule_based(text: str, shop_rules: ShopRules | None = None) -> Class
                     reason=f"Matched blocked keyword: {keyword}",
                 )
 
-    # --- Shop custom blocked patterns ---
+    # --- Shop custom blocked patterns (pre-compiled with timeout protection) ---
     for pattern_str in rules.blocked_patterns:
         try:
-            if re.search(pattern_str, text_lower, re.IGNORECASE):
+            compiled = re.compile(pattern_str, re.IGNORECASE)
+            if compiled.search(text_lower[:500]):
                 return ClassifyResult(
                     intent="blocked", confidence=0.95,
                     action="hide",
                     reason=f"Matched blocked pattern: {pattern_str}",
                 )
-        except re.error:
-            pass  # skip invalid regex
+        except (re.error, TimeoutError):
+            pass  # skip invalid or slow regex
 
     # --- Empty / too short ---
     if not text_stripped:
@@ -242,13 +243,17 @@ async def _check_llm_rate(shop_id: int, limit: int) -> bool:
 
 async def classify_llm(text: str) -> ClassifyResult:
     """Expensive classification via LLM — only for low-confidence cases."""
+    import asyncio
     import google.generativeai as genai
 
     genai.configure(api_key=settings.gemini_api_key, transport="rest")
     model = genai.GenerativeModel("gemini-2.0-flash")
     prompt = _LLM_CLASSIFY_PROMPT.format(text=text[:200])
 
-    response = model.generate_content(prompt, generation_config={"max_output_tokens": 10})
+    # Run sync SDK call in thread pool to avoid blocking the event loop
+    response = await asyncio.to_thread(
+        model.generate_content, prompt, generation_config={"max_output_tokens": 10}
+    )
     intent = response.text.strip().lower()
 
     if intent not in _VALID_INTENTS:

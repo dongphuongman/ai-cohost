@@ -37,8 +37,24 @@ async def get_shop_rules(db: AsyncSession, shop_id: int) -> ShopRules:
     )
 
 
+def _validate_patterns(patterns: list[str] | None) -> None:
+    """Validate regex patterns at write time to prevent ReDoS."""
+    if not patterns:
+        return
+    import re
+    for p in patterns:
+        if len(p) > 200:
+            raise ValueError(f"Pattern quá dài (tối đa 200 ký tự): {p[:50]}...")
+        try:
+            re.compile(p)
+        except re.error as e:
+            raise ValueError(f"Regex không hợp lệ '{p}': {e}")
+
+
 async def upsert_rules(db: AsyncSession, shop_id: int, **kwargs) -> ShopModerationRules:
     """Create or update moderation rules for a shop."""
+    if "blocked_patterns" in kwargs and kwargs["blocked_patterns"] is not None:
+        _validate_patterns(kwargs["blocked_patterns"])
     row = await get_rules(db, shop_id)
     if row:
         for key, value in kwargs.items():
@@ -153,6 +169,12 @@ async def bulk_review(
             update(Comment)
             .where(Comment.id.in_(comment_ids))
             .values(is_spam=True)
+        )
+    elif action == "approved":
+        await db.execute(
+            update(Comment)
+            .where(Comment.id.in_(comment_ids))
+            .values(is_spam=False)
         )
 
     return result.rowcount

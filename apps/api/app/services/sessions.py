@@ -129,9 +129,11 @@ async def update_suggestion_action(
     # Update session action counts
     count_col = {
         "sent": LiveSession.sent_count,
+        "auto_sent": LiveSession.sent_count,
         "pasted_not_sent": LiveSession.pasted_not_sent_count,
         "read": LiveSession.read_count,
         "dismissed": LiveSession.dismissed_count,
+        "auto_cancelled": LiveSession.dismissed_count,
     }.get(action)
 
     if count_col is not None:

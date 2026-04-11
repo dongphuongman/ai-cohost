@@ -154,7 +154,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     result = await db.execute(
                         select(LiveSession).where(
                             LiveSession.uuid == session_uuid,
-                            LiveSession.status.in_(["active", "interrupted"]),
+                            LiveSession.status.in_(["running", "interrupted"]),
                         )
                     )
                     session = result.scalar_one_or_none()
@@ -184,7 +184,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         await db.execute(
                             sa_update(LiveSession)
                             .where(LiveSession.id == session.id)
-                            .values(status="active")
+                            .values(status="running")
                         )
                         await db.commit()
 
@@ -448,6 +448,7 @@ async def _listen_suggestions(websocket: WebSocket, state: WSConnectionState) ->
                                 if comment_obj and suggestion_obj and session_obj:
                                     auto_reply_decision = await should_auto_reply(
                                         comment_obj, suggestion_obj, session_obj, shop_plan,
+                                        db=db,
                                     )
                         except Exception:
                             logger.debug("Auto-reply check failed", exc_info=True)

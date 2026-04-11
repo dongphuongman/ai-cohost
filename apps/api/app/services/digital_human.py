@@ -101,12 +101,14 @@ async def generate_video(
 
 
 async def list_videos(
-    db: AsyncSession, shop_id: int
+    db: AsyncSession, shop_id: int, limit: int = 50, offset: int = 0
 ) -> list[DhVideo]:
     result = await db.execute(
         select(DhVideo)
         .where(DhVideo.shop_id == shop_id)
         .order_by(DhVideo.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
     return list(result.scalars().all())
 

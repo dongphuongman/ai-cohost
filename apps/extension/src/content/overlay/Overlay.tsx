@@ -134,7 +134,7 @@ export function Overlay({ onSendAction, onSaveAsFaq, onReadAloud, onPauseSession
       } else if (e.key === 'Escape') {
         if (pendingAutoReply) {
           if (autoReplyTimerRef.current) clearInterval(autoReplyTimerRef.current);
-          onSendAction(pendingAutoReply.suggestion.id, 'dismissed');
+          onSendAction(pendingAutoReply.suggestion.id, 'auto_cancelled');
           setPendingAutoReply(null);
         } else {
           handleAction(currentSuggestion.id, 'dismissed');
@@ -296,7 +296,7 @@ export function Overlay({ onSendAction, onSaveAsFaq, onReadAloud, onPauseSession
                 <button
                   onClick={() => {
                     if (autoReplyTimerRef.current) clearInterval(autoReplyTimerRef.current);
-                    onSendAction(pendingAutoReply.suggestion.id, 'dismissed');
+                    onSendAction(pendingAutoReply.suggestion.id, 'auto_cancelled');
                     setPendingAutoReply(null);
                   }}
                   style="width:100%;padding:6px;background:#EF4444;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;"

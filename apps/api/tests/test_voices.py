@@ -161,12 +161,12 @@ class FakeUploadFile:
 @pytest.mark.asyncio
 class TestValidateAudioFile:
     async def test_valid_mp3(self):
-        audio = FakeUploadFile("voice.mp3", b"\x00" * 5000)
+        audio = FakeUploadFile("voice.mp3", b"ID3" + b"\x00" * 4997)
         result = await validate_audio_file(audio)
         assert len(result) == 5000
 
     async def test_valid_wav(self):
-        audio = FakeUploadFile("voice.wav", b"\x00" * 5000)
+        audio = FakeUploadFile("voice.wav", b"RIFF" + b"\x00" * 4996)
         result = await validate_audio_file(audio)
         assert len(result) == 5000
 
