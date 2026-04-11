@@ -48,4 +48,7 @@ export type WSServerMessage =
   | { type: "suggestion.new"; suggestion: WSSuggestion }
   | { type: "suggestion.stream"; suggestion_id: string; chunk: string }
   | { type: "suggestion.complete"; suggestion_id: string }
+  | { type: "comment.hidden"; comment_id: number; reason: string }
+  | { type: "comment.flagged"; comment_id: number; comment: WSComment; reason: string }
+  | { type: "comment.received"; comment_id: number; comment: WSComment; intent: string; skipped_reason: string }
   | { type: "error"; code: string; message: string };

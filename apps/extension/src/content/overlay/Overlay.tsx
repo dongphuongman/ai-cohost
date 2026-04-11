@@ -10,15 +10,21 @@ interface Props {
   onReadAloud: (text: string) => void;
   onPauseSession: () => void;
   onEndSession: () => void;
+  onToggleAutoReply?: (enabled: boolean) => void;
   platform: string;
+  initialAutoReply?: boolean;
 }
 
-export function Overlay({ onSendAction, onSaveAsFaq, onReadAloud, onPauseSession, onEndSession, platform }: Props) {
+export function Overlay({ onSendAction, onSaveAsFaq, onReadAloud, onPauseSession, onEndSession, onToggleAutoReply, platform, initialAutoReply }: Props) {
   const [collapsed, setCollapsed] = useState(false);
+  const [autoReplyOn, setAutoReplyOn] = useState(initialAutoReply ?? false);
+  const [pendingAutoReply, setPendingAutoReply] = useState<{ suggestion: WSSuggestion; deadline: Date } | null>(null);
+  const [countdown, setCountdown] = useState(0);
+  const autoReplyTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [position, setPosition] = useState({ x: 0, y: 20 });
   const [currentSuggestion, setCurrentSuggestion] = useState<WSSuggestion | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [stats, setStats] = useState({ duration: 0, comments: 0, suggestions: 0 });
+  const [stats, setStats] = useState({ duration: 0, comments: 0, suggestions: 0, hidden: 0 });
   const [streamingText, setStreamingText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
@@ -65,6 +71,46 @@ export function Overlay({ onSendAction, onSaveAsFaq, onReadAloud, onPauseSession
         }
       } else if (type === 'comment.counted') {
         setStats((s) => ({ ...s, comments: s.comments + 1 }));
+      } else if (type === 'comment.hidden') {
+        setStats((s) => ({ ...s, hidden: s.hidden + 1 }));
+      } else if (type === 'suggestion.auto_reply') {
+        if (autoReplyOn) {
+          setPendingAutoReply({ suggestion: data.suggestion, deadline: new Date(data.undo_deadline) });
+          setCountdown(15);
+          if (autoReplyTimerRef.current) clearInterval(autoReplyTimerRef.current);
+          autoReplyTimerRef.current = setInterval(() => {
+            setCountdown((prev) => {
+              if (prev <= 1) {
+                if (autoReplyTimerRef.current) clearInterval(autoReplyTimerRef.current);
+                // Auto-send
+                onSendAction(data.suggestion.id, 'sent');
+                setPendingAutoReply(null);
+                return 0;
+              }
+              return prev - 1;
+            });
+          }, 1000);
+        }
+      } else if (type === 'comment.flagged') {
+        // Show flagged comment in history with warning status
+        const flaggedComment = data.comment;
+        if (flaggedComment) {
+          setHistory((h) => [
+            {
+              suggestion: {
+                id: `flagged-${data.comment_id}`,
+                replyText: '',
+                originalComment: flaggedComment,
+                confidence: 0,
+                createdAt: new Date().toISOString(),
+              },
+              action: 'dismissed' as const,
+              actionAt: new Date(),
+              flagReason: data.reason,
+            },
+            ...h,
+          ]);
+        }
       }
     };
 
@@ -86,7 +132,13 @@ export function Overlay({ onSendAction, onSaveAsFaq, onReadAloud, onPauseSession
         e.preventDefault();
         // Edit mode handled inside SuggestionCard
       } else if (e.key === 'Escape') {
-        handleAction(currentSuggestion.id, 'dismissed');
+        if (pendingAutoReply) {
+          if (autoReplyTimerRef.current) clearInterval(autoReplyTimerRef.current);
+          onSendAction(pendingAutoReply.suggestion.id, 'dismissed');
+          setPendingAutoReply(null);
+        } else {
+          handleAction(currentSuggestion.id, 'dismissed');
+        }
       }
     };
 
@@ -185,6 +237,24 @@ export function Overlay({ onSendAction, onSaveAsFaq, onReadAloud, onPauseSession
           </div>
         </div>
 
+        {/* Auto-reply indicator */}
+        {autoReplyOn && (
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 12px;background:#5B47E0;font-size:11px;color:#fff;">
+            <span>Auto-reply BAT</span>
+            <button
+              onClick={() => {
+                setAutoReplyOn(false);
+                if (autoReplyTimerRef.current) clearInterval(autoReplyTimerRef.current);
+                setPendingAutoReply(null);
+                onToggleAutoReply?.(false);
+              }}
+              style="padding:2px 8px;background:#EF4444;border-radius:4px;font-size:10px;font-weight:600;border:none;color:#fff;cursor:pointer;"
+            >
+              TAT NGAY
+            </button>
+          </div>
+        )}
+
         {/* Stats */}
         <div class="aco-stats">
           <div class="aco-stat-item">
@@ -199,11 +269,44 @@ export function Overlay({ onSendAction, onSaveAsFaq, onReadAloud, onPauseSession
             <span class="aco-stat-value">{stats.suggestions}</span>
             <span>Gợi ý</span>
           </div>
+          {stats.hidden > 0 && (
+            <div class="aco-stat-item">
+              <span class="aco-stat-value">{stats.hidden}</span>
+              <span>Ẩn</span>
+            </div>
+          )}
         </div>
 
         {/* Suggestion */}
         {!collapsed && (
           <>
+            {/* Auto-reply countdown */}
+            {pendingAutoReply && (
+              <div style="padding:10px;margin:8px;background:rgba(91,71,224,0.1);border:1px solid rgba(91,71,224,0.3);border-radius:8px;">
+                <div style="font-size:11px;color:#5B47E0;margin-bottom:6px;">Auto-reply trong {countdown}s</div>
+                <div style="font-size:12px;color:#6B7280;margin-bottom:4px;">
+                  {pendingAutoReply.suggestion.originalComment}
+                </div>
+                <div style="font-size:12px;background:#F3F4F6;border-radius:6px;padding:6px 8px;margin-bottom:8px;">
+                  {pendingAutoReply.suggestion.replyText}
+                </div>
+                <div style="width:100%;background:#D1D5DB;border-radius:4px;height:4px;margin-bottom:8px;">
+                  <div style={`width:${(countdown / 15) * 100}%;background:#5B47E0;height:4px;border-radius:4px;transition:width 1s linear;`} />
+                </div>
+                <button
+                  onClick={() => {
+                    if (autoReplyTimerRef.current) clearInterval(autoReplyTimerRef.current);
+                    onSendAction(pendingAutoReply.suggestion.id, 'dismissed');
+                    setPendingAutoReply(null);
+                  }}
+                  style="width:100%;padding:6px;background:#EF4444;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;"
+                >
+                  HUY — Toi tu tra loi
+                </button>
+                <div style="text-align:center;font-size:10px;color:#9CA3AF;margin-top:4px;">Hoac nhan Esc</div>
+              </div>
+            )}
+
             <SuggestionCard
               suggestion={displaySuggestion}
               isStreaming={isStreaming}

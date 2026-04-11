@@ -53,4 +53,13 @@ export async function saveActiveSession(session: ActiveSession): Promise<void> {
 
 export async function clearActiveSession(): Promise<void> {
   await removeStorageValue(STORAGE_KEYS.ACTIVE_SESSION);
+  await removeStorageValue(STORAGE_KEYS.ACTIVE_TAB_ID);
+}
+
+export async function getActiveTabId(): Promise<number | null> {
+  return getStorageValue<number>(STORAGE_KEYS.ACTIVE_TAB_ID);
+}
+
+export async function saveActiveTabId(tabId: number): Promise<void> {
+  await setStorageValue(STORAGE_KEYS.ACTIVE_TAB_ID, tabId);
 }

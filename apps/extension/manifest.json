@@ -8,7 +8,9 @@
     "https://www.facebook.com/*",
     "https://www.tiktok.com/*",
     "https://www.youtube.com/*",
-    "https://live.shopee.vn/*"
+    "https://live.shopee.vn/*",
+    "http://localhost/*",
+    "file:///*"
   ],
   "background": {
     "service_worker": "src/background/index.ts",
@@ -20,10 +22,17 @@
         "https://www.facebook.com/*",
         "https://www.tiktok.com/*",
         "https://www.youtube.com/*",
-        "https://live.shopee.vn/*"
+        "https://live.shopee.vn/*",
+        "http://localhost:*/*",
+        "file:///*"
       ],
       "js": ["src/content/index.ts"],
       "css": ["src/styles.css"]
+    },
+    {
+      "matches": ["http://localhost:3000/*"],
+      "js": ["src/content/dashboard-bridge.ts"],
+      "run_at": "document_idle"
     }
   ],
   "action": {

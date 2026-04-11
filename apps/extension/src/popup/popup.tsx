@@ -55,6 +55,7 @@ export function Popup() {
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [selectedPersonaId, setSelectedPersonaId] = useState<number | null>(null);
   const [configLoading, setConfigLoading] = useState(false);
+  const [autoReplyEnabled, setAutoReplyEnabled] = useState(false);
 
   useEffect(() => {
     chrome.runtime.sendMessage({ type: 'GET_AUTH_TOKEN' }, (res) => {
@@ -162,6 +163,7 @@ export function Popup() {
           productIds: selectedProductIds,
           personaId: selectedPersonaId,
           platform: liveDetection!.platform,
+          autoReplyEnabled,
         },
         (res) => {
           setStarting(false);
@@ -198,14 +200,12 @@ export function Popup() {
             Vui lòng đăng nhập trên Dashboard trước khi sử dụng extension.
           </p>
         </div>
-        <a
-          href={`${DASHBOARD_URL}/login`}
-          target="_blank"
-          rel="noreferrer"
+        <button
+          onClick={() => chrome.tabs.create({ url: `${DASHBOARD_URL}/login` })}
           class="block w-full rounded-md bg-primary py-2 text-center text-sm font-medium text-white hover:bg-primary/90"
         >
           Đăng nhập
-        </a>
+        </button>
       </div>
     );
   }
@@ -311,6 +311,32 @@ export function Popup() {
                     </div>
                   )}
 
+                  {/* Auto-Reply Toggle */}
+                  <div class="border-t border-gray-200 pt-3 mt-3">
+                    <div class="flex items-center justify-between">
+                      <div>
+                        <div class="text-xs font-medium text-gray-700">Auto-reply</div>
+                        <div class="text-[10px] text-gray-400">
+                          Tu dong tra loi chao hoi va FAQ
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={autoReplyEnabled}
+                        onClick={() => setAutoReplyEnabled(!autoReplyEnabled)}
+                        class={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${autoReplyEnabled ? 'bg-primary' : 'bg-gray-300'}`}
+                      >
+                        <span class={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${autoReplyEnabled ? 'translate-x-4' : 'translate-x-0'}`} />
+                      </button>
+                    </div>
+                    {autoReplyEnabled && (
+                      <div class="text-[10px] text-yellow-600 mt-1.5">
+                        ⚠ Chi auto-reply cho: chao hoi, cam on, FAQ khop &gt;90%
+                      </div>
+                    )}
+                  </div>
+
                   {/* Start button */}
                   <button
                     onClick={handleStartSession}
@@ -339,14 +365,12 @@ export function Popup() {
       )}
 
       <div class="space-y-2">
-        <a
-          href={`${DASHBOARD_URL}/dashboard`}
-          target="_blank"
-          rel="noreferrer"
-          class="block w-full rounded-md border border-gray-200 py-2 text-center text-sm font-medium text-gray-700 hover:bg-gray-50"
+        <button
+          onClick={() => chrome.tabs.create({ url: `${DASHBOARD_URL}/dashboard` })}
+          class="block w-full rounded-md border border-gray-200 py-2 text-center text-sm font-medium text-gray-700 hover:bg-gray-50 cursor-pointer"
         >
           Mở Dashboard
-        </a>
+        </button>
       </div>
     </div>
   );
