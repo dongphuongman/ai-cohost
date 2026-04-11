@@ -1,7 +1,7 @@
 from celery_app import app
 
 
-@app.task(name="tasks.usage.log_usage")
+@app.task(name="tasks.usage.log_usage", soft_time_limit=10)
 def log_usage(
     shop_id: int,
     resource_type: str,

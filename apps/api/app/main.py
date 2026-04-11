@@ -5,8 +5,10 @@ import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from sqlalchemy import text
+
 from app.core.config import settings
-from app.core.database import engine
+from app.core.database import async_session, engine
 from app.routers import analytics, auth, billing, faqs, personas, products, scripts, sessions, shops, tts, webhooks
 from app.ws.handler import websocket_endpoint as ws_handler, _redis as ws_redis
 
@@ -78,7 +80,25 @@ app.include_router(webhooks.router, prefix=api_prefix)
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    checks: dict[str, str] = {}
+
+    # DB check
+    try:
+        async with async_session() as db:
+            await db.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception:
+        checks["database"] = "error"
+
+    # Redis check
+    try:
+        await ws_redis.ping()
+        checks["redis"] = "ok"
+    except Exception:
+        checks["redis"] = "error"
+
+    all_ok = all(v == "ok" for v in checks.values())
+    return {"status": "ok" if all_ok else "degraded", **checks}
 
 
 app.websocket("/ws")(ws_handler)

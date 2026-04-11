@@ -388,10 +388,10 @@ def _do_generate(comment_id: int, session_id: int, shop_id: int) -> dict:
         prompt = _build_prompt(persona, comment_text, products, faqs, history)
 
         # 10. Call LLM with fallback: Gemini Flash → DeepSeek V3
+        start_time = time.time()
         full_response, llm_model_used, llm_provider_used = _call_llm_with_fallback(
             prompt, comment_id, session_id,
         )
-        start_time = time.time()
         latency_ms = int((time.time() - start_time) * 1000)
 
         if not full_response.strip():
@@ -481,7 +481,7 @@ def _do_generate(comment_id: int, session_id: int, shop_id: int) -> dict:
         }
 
 
-@app.task(name="tasks.llm.classify_intent")
+@app.task(name="tasks.llm.classify_intent", soft_time_limit=15)
 def classify_intent(comment_id: int, text_: str) -> dict:
     """Classify comment intent (standalone task, rarely used — inline is preferred)."""
     intent, confidence = _classify_intent(text_)
