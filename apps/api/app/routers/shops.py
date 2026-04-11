@@ -23,6 +23,31 @@ from app.schemas.shops import (
 router = APIRouter(prefix="/shops", tags=["shops"])
 
 
+INDUSTRIES = [
+    "Mỹ phẩm",
+    "Thời trang",
+    "Đồ gia dụng",
+    "Thực phẩm chức năng",
+    "Mẹ và bé",
+    "Điện tử",
+    "Khác",
+]
+
+PLATFORMS = ["TikTok Live", "Shopee Live", "Facebook Live", "YouTube Live"]
+
+TEAM_SIZES = ["1 người", "2-5 người", "6-10 người", "Hơn 10 người"]
+
+
+@router.get("/config/options")
+async def get_shop_options():
+    """Return selector options for onboarding and shop creation forms."""
+    return {
+        "industries": INDUSTRIES,
+        "platforms": PLATFORMS,
+        "team_sizes": TEAM_SIZES,
+    }
+
+
 def _slugify(name: str, suffix: int) -> str:
     slug = name.lower().strip()
     slug = re.sub(r"[^\w\s-]", "", slug)

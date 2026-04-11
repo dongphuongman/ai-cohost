@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from sqlalchemy import text
 
-from app.core.config import settings
+from app.core.config import settings, validate_production_settings
 from app.core.database import async_session, engine
 from app.routers import analytics, auth, billing, faqs, personas, products, scripts, sessions, shops, tts, webhooks
 from app.ws.handler import websocket_endpoint as ws_handler, _redis as ws_redis
@@ -27,6 +27,8 @@ def _filter_sensitive_data(event, hint):
         event["user"].pop("ip_address", None)
     return event
 
+
+validate_production_settings()
 
 if settings.sentry_dsn:
     sentry_sdk.init(
@@ -58,7 +60,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url, "chrome-extension://*"],
+    allow_origins=[
+        settings.frontend_url,
+        *(
+            [f"chrome-extension://{settings.extension_id}"]
+            if settings.extension_id
+            else []
+        ),
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

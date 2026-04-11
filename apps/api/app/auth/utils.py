@@ -60,9 +60,11 @@ async def consume_refresh_jti(jti: str, expire_days: int | None = None) -> bool:
 def create_reset_token(user_id: int) -> str:
     now = datetime.now(timezone.utc)
     expire = now + timedelta(hours=1)
+    jti = uuid.uuid4().hex
     payload = {
         "sub": str(user_id),
         "type": "reset",
+        "jti": jti,
         "iat": now,
         "exp": expire,
     }

@@ -1,5 +1,8 @@
+import asyncio
+import html as html_mod
 import io
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response, StreamingResponse
@@ -154,7 +157,6 @@ async def export_text(
         raise HTTPException(status_code=404, detail="Script không tồn tại")
 
     # Strip markdown headings for plain text
-    import re
     plain = re.sub(r"^#+\s*", "", script.content, flags=re.MULTILINE)
     plain = f"{script.title}\n{'=' * len(script.title)}\n\n{plain}"
     filename = f"script-{script.id}.txt"
@@ -189,6 +191,7 @@ async def export_pdf(
     )
     duration_min = (script.estimated_duration_seconds or 0) // 60
     created = script.created_at.strftime("%d/%m/%Y %H:%M") if script.created_at else ""
+    safe_title_html = html_mod.escape(script.title)
 
     styled_html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
@@ -198,7 +201,7 @@ h2 {{ color: #2E75B6; font-size: 18px; margin-top: 24px; }}
 .meta {{ color: #6B7280; font-size: 13px; margin-bottom: 20px; }}
 .footer {{ color: #9CA3AF; font-size: 11px; text-align: center; margin-top: 40px; }}
 </style></head><body>
-<h1>{script.title}</h1>
+<h1>{safe_title_html}</h1>
 <div class="meta">AI Co-host &bull; {script.word_count or 0} tu &bull;
 ~{duration_min} phut &bull; {created}</div>
 <hr>
@@ -206,8 +209,11 @@ h2 {{ color: #2E75B6; font-size: 18px; margin-top: 24px; }}
 <div class="footer">Tao boi AI Co-host</div>
 </body></html>"""
 
-    pdf_bytes = HTML(string=styled_html).write_pdf()
-    safe_title = script.title[:30].replace('"', "")
+    def _render_pdf():
+        return HTML(string=styled_html, url_fetcher=lambda *a, **k: (_ for _ in ()).throw(ValueError("blocked"))).write_pdf()
+
+    pdf_bytes = await asyncio.to_thread(_render_pdf)
+    safe_title = re.sub(r'[^\w\s-]', '', script.title[:30]).strip()
     filename = f"script-{script.id}-{safe_title}.pdf"
     return Response(
         content=pdf_bytes,

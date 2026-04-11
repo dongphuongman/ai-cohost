@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.utils import (
+    consume_refresh_jti,
     create_access_token,
     create_refresh_token,
     create_reset_token,
@@ -132,6 +133,20 @@ async def refresh(db: AsyncSession, refresh_token: str) -> TokenResponse:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token type không hợp lệ",
+        )
+
+    # JTI rotation: each refresh token can only be used once
+    jti = payload.get("jti")
+    if not jti:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token không hợp lệ. Vui lòng đăng nhập lại.",
+        )
+    is_valid = await consume_refresh_jti(jti)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token đã được sử dụng. Vui lòng đăng nhập lại.",
         )
 
     user_id = int(payload["sub"])
@@ -303,6 +318,16 @@ async def reset_password(db: AsyncSession, token: str, new_password: str) -> dic
             detail="Token không hợp lệ",
         )
 
+    # Single-use enforcement: each reset token can only be used once
+    jti = payload.get("jti")
+    if jti:
+        is_valid = await consume_refresh_jti(jti, expire_days=1)
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Link đặt lại mật khẩu đã được sử dụng. Vui lòng yêu cầu link mới.",
+            )
+
     user_id = int(payload["sub"])
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -336,7 +361,12 @@ async def google_oauth(db: AsyncSession, credential: str) -> TokenResponse:
         )
 
     # Validate audience claim matches our Google client ID
-    if settings.google_client_id and google_data.get("aud") != settings.google_client_id:
+    if not settings.google_client_id:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google OAuth chưa được cấu hình",
+        )
+    if google_data.get("aud") != settings.google_client_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Google token không hợp lệ cho ứng dụng này",
