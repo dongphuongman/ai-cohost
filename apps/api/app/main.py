@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from app.core.config import settings, validate_production_settings
 from app.core.database import async_session, engine
-from app.routers import analytics, auth, billing, faqs, personas, products, scripts, sessions, shops, tts, webhooks
+from app.routers import analytics, auth, billing, faqs, moderation, personas, products, scripts, sessions, shops, tts, videos, voices, webhooks
 from app.ws.handler import websocket_endpoint as ws_handler, _redis as ws_redis
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,9 @@ app.include_router(billing.router, prefix=api_prefix)
 app.include_router(tts.router, prefix=api_prefix)
 app.include_router(analytics.router, prefix=api_prefix)
 app.include_router(webhooks.router, prefix=api_prefix)
+app.include_router(voices.router, prefix=api_prefix)
+app.include_router(videos.router, prefix=api_prefix)
+app.include_router(moderation.router, prefix=api_prefix)
 
 
 @app.get("/health")

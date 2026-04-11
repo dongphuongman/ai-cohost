@@ -18,11 +18,12 @@ _engine = create_engine(_sync_db_url)
 
 
 def _get_embedding(content: str, task_type: str = "RETRIEVAL_DOCUMENT") -> list[float]:
-    genai.configure(api_key=settings.gemini_api_key)
+    genai.configure(api_key=settings.gemini_api_key, transport="rest")
     result = genai.embed_content(
-        model="models/text-embedding-004",
+        model="models/gemini-embedding-001",
         content=content,
         task_type=task_type,
+        output_dimensionality=768,
     )
     return result["embedding"]  # 768 dimensions
 
@@ -63,7 +64,7 @@ def embed_product(product_id: int) -> dict:
                 ),
                 {
                     "emb": str(embedding),
-                    "model": "gemini-text-embedding-004",
+                    "model": "gemini-embedding-001",
                     "ts": datetime.now(timezone.utc),
                     "id": product_id,
                 },
@@ -116,7 +117,7 @@ def embed_faq(faq_id: int) -> dict:
                 ),
                 {
                     "emb": str(embedding),
-                    "model": "gemini-text-embedding-004",
+                    "model": "gemini-embedding-001",
                     "ts": datetime.now(timezone.utc),
                     "id": faq_id,
                 },

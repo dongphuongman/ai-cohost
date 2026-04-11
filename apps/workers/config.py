@@ -9,10 +9,13 @@ class WorkerSettings(BaseSettings):
     anthropic_api_key: str = ""
     deepseek_api_key: str = ""
 
-    embedding_model: str = "gemini-text-embedding-004"
+    elevenlabs_api_key: str = ""
+    heygen_api_key: str = ""
+
+    embedding_model: str = "gemini-embedding-001"
     embedding_dimension: int = 768
 
-    model_config = {"env_file": "../../.env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": "../../.env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = WorkerSettings()

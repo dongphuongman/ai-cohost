@@ -18,10 +18,22 @@ from app.schemas.scripts import (
     ScriptUpdate,
 )
 from app.services import scripts as script_svc
+from app.services.embed_client import get_job_status
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/scripts", tags=["scripts"])
+
+
+@router.get("/jobs/{job_id}/status")
+async def check_job_status(
+    job_id: str,
+    shop: ShopContext = Depends(get_current_shop),
+):
+    result = await get_job_status(job_id)
+    if result is None:
+        return {"status": "pending"}
+    return result
 
 
 @router.get("/", response_model=ScriptListResponse)

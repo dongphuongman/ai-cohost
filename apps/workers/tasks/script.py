@@ -20,11 +20,12 @@ _redis = redis.from_url(settings.redis_url)
 
 
 def _get_embedding(content: str, task_type: str = "RETRIEVAL_QUERY") -> list[float]:
-    genai.configure(api_key=settings.gemini_api_key)
+    genai.configure(api_key=settings.gemini_api_key, transport="rest")
     result = genai.embed_content(
-        model="models/text-embedding-004",
+        model="models/gemini-embedding-001",
         content=content,
         task_type=task_type,
+        output_dimensionality=768,
     )
     return result["embedding"]
 
@@ -171,7 +172,7 @@ def _fetch_few_shot_samples(products: list[dict], persona_style: str) -> list[st
                 SELECT content FROM script_samples
                 WHERE category = :category AND persona_style = :style
                   AND quality_score >= 4
-                ORDER BY embedding <=> :embedding::vector
+                ORDER BY embedding <=> CAST(:embedding AS vector)
                 LIMIT 3
             """),
             {
@@ -187,7 +188,7 @@ def _fetch_few_shot_samples(products: list[dict], persona_style: str) -> list[st
                 text("""
                     SELECT content FROM script_samples
                     WHERE quality_score >= 4
-                    ORDER BY embedding <=> :embedding::vector
+                    ORDER BY embedding <=> CAST(:embedding AS vector)
                     LIMIT 3
                 """),
                 {"embedding": str(query_embedding)},
@@ -236,20 +237,14 @@ def generate_script(
             special_notes=config.get("special_notes"),
         )
 
-        # 3. Call Gemini Flash (streaming)
-        genai.configure(api_key=settings.gemini_api_key)
+        # 3. Call Gemini Flash — non-streaming, fail fast on errors
+        genai.configure(api_key=settings.gemini_api_key, transport="rest")
         model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(prompt, stream=True)
-
-        full_response = ""
-        for chunk in response:
-            if chunk.text:
-                full_response += chunk.text
-                _redis.publish(channel, json.dumps({
-                    "type": "script.chunk",
-                    "job_id": job_id,
-                    "chunk": chunk.text,
-                }))
+        response = model.generate_content(
+            prompt,
+            request_options={"timeout": 90},
+        )
+        full_response = response.text or ""
 
         if not full_response.strip():
             raise ValueError("LLM returned empty response")
@@ -321,7 +316,7 @@ def generate_script(
             )
             session.commit()
 
-        # 7. Publish completion
+        # 7. Publish completion + set job status in Redis
         _redis.publish(channel, json.dumps({
             "type": "script.complete",
             "job_id": job_id,
@@ -334,6 +329,10 @@ def generate_script(
                 "cta_count": cta_count,
             },
         }))
+        _redis.setex(f"job:{job_id}", 600, json.dumps({
+            "status": "complete",
+            "script_id": script_id,
+        }))
 
         return {
             "status": "ok",
@@ -343,9 +342,18 @@ def generate_script(
 
     except Exception as exc:
         logger.exception("Script generation failed for shop %s", shop_id)
+        error_msg = str(exc)
+        if "429" in error_msg or "quota" in error_msg.lower() or "RESOURCE_EXHAUSTED" in error_msg:
+            user_error = "API key đã hết quota. Vui lòng kiểm tra billing hoặc thử lại sau."
+        else:
+            user_error = "Có lỗi khi tạo script. Vui lòng thử lại."
         _redis.publish(channel, json.dumps({
             "type": "script.error",
             "job_id": job_id,
-            "error": "Có lỗi khi tạo script. Vui lòng thử lại.",
+            "error": user_error,
+        }))
+        _redis.setex(f"job:{job_id}", 600, json.dumps({
+            "status": "error",
+            "error": user_error,
         }))
         raise task.retry(exc=exc, countdown=10)
