@@ -7,10 +7,22 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
 
+import redis.asyncio as aioredis
+
 from app.core.config import settings
 from app.core.database import async_session
 from app.models.billing import Invoice, Subscription
 from app.models.tenant import Shop
+
+_redis = aioredis.from_url(settings.redis_url if hasattr(settings, 'redis_url') else "redis://localhost:6379/0")
+
+
+async def _redis_check_event(event_id: str) -> bool:
+    return await _redis.exists(f"webhook_event:{event_id}")
+
+
+async def _redis_mark_event(event_id: str) -> None:
+    await _redis.setex(f"webhook_event:{event_id}", 86400, "1")
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 logger = logging.getLogger(__name__)
@@ -41,15 +53,29 @@ async def lemonsqueezy_webhook(request: Request):
     event_name = data.get("meta", {}).get("event_name", "")
     attrs = data.get("data", {}).get("attributes", {})
 
+    # Idempotency: check event_id to avoid duplicate processing
+    event_id = data.get("meta", {}).get("event_id", "")
+    if event_id:
+        already = await _redis_check_event(event_id)
+        if already:
+            logger.info("Duplicate event %s, skipping", event_id)
+            return {"status": "ok", "duplicate": True}
+
     async with async_session() as db:
         if event_name in ("subscription_created", "subscription_updated"):
             await _handle_subscription(db, attrs)
         elif event_name == "subscription_cancelled":
             await _handle_subscription_cancelled(db, attrs)
+        elif event_name == "subscription_payment_failed":
+            await _handle_payment_failed(db, attrs)
         elif event_name in ("order_created", "order_refunded"):
             await _handle_invoice(db, event_name, attrs)
         else:
             logger.info("Unhandled LemonSqueezy event: %s", event_name)
+
+    # Mark event as processed (24h TTL)
+    if event_id:
+        await _redis_mark_event(event_id)
 
     return {"status": "ok"}
 
@@ -128,12 +154,48 @@ async def _handle_subscription_cancelled(db, attrs: dict) -> None:
         )
     )
     sub = result.scalar_one_or_none()
+    now = datetime.now(timezone.utc)
     if sub:
         sub.status = "cancelled"
         sub.cancel_at_period_end = True
-        sub.cancelled_at = datetime.now(timezone.utc)
-        sub.updated_at = datetime.now(timezone.utc)
-        await db.commit()
+        sub.cancelled_at = now
+        sub.updated_at = now
+
+    # Also update shop plan_status
+    shop_result = await db.execute(select(Shop).where(Shop.id == shop_id))
+    shop = shop_result.scalar_one_or_none()
+    if shop:
+        shop.plan_status = "cancelled"
+        shop.updated_at = now
+
+    await db.commit()
+
+
+async def _handle_payment_failed(db, attrs: dict) -> None:
+    shop_id = int(attrs.get("custom_data", {}).get("shop_id", 0))
+    if not shop_id:
+        return
+
+    result = await db.execute(
+        select(Subscription).where(
+            Subscription.shop_id == shop_id,
+            Subscription.provider == "lemonsqueezy",
+        )
+    )
+    sub = result.scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if sub:
+        sub.status = "past_due"
+        sub.updated_at = now
+
+    shop_result = await db.execute(select(Shop).where(Shop.id == shop_id))
+    shop = shop_result.scalar_one_or_none()
+    if shop:
+        shop.plan_status = "past_due"
+        shop.updated_at = now
+
+    await db.commit()
+    logger.warning("Payment failed for shop %s", shop_id)
 
 
 async def _handle_invoice(db, event_name: str, attrs: dict) -> None:
