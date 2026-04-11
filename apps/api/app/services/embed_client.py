@@ -62,6 +62,53 @@ async def enqueue_faq_embedding(faq_id: int) -> None:
         logger.exception("Failed to enqueue embed_faq for %s", faq_id)
 
 
+async def enqueue_script_task(
+    shop_id: int,
+    user_id: int,
+    config: dict,
+    products: list[dict],
+    persona: dict | None,
+) -> str:
+    """Enqueue script generation on the script_queue. Returns task_id."""
+    task_id = str(uuid.uuid4())
+    body = json.dumps({
+        "id": task_id,
+        "task": "tasks.script.generate_script",
+        "args": [],
+        "kwargs": {
+            "shop_id": shop_id,
+            "user_id": user_id,
+            "config": config,
+            "products": products,
+            "persona": persona,
+        },
+        "retries": 0,
+    })
+    message = json.dumps({
+        "body": body,
+        "content-encoding": "utf-8",
+        "content-type": "application/json",
+        "headers": {
+            "id": task_id,
+            "task": "tasks.script.generate_script",
+            "lang": "py",
+            "root_id": task_id,
+        },
+        "properties": {
+            "delivery_mode": 2,
+            "delivery_tag": task_id,
+            "body_encoding": "utf-8",
+            "delivery_info": {"exchange": "", "routing_key": "script_queue"},
+        },
+    })
+    try:
+        await _redis.lpush("script_queue", message)
+    except Exception:
+        logger.exception("Failed to enqueue script generation for shop %s", shop_id)
+        raise
+    return task_id
+
+
 async def enqueue_suggestion_task(
     comment_id: int, session_id: int, shop_id: int
 ) -> None:

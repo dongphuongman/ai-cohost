@@ -213,6 +213,76 @@ def _cache_key(shop_id: int, comment_text: str) -> str:
     return f"suggestion_cache:{shop_id}:{h}"
 
 
+# --- LLM with fallback ---
+
+
+def _call_llm_with_fallback(
+    prompt: str, comment_id: int, session_id: int,
+) -> tuple[str, str, str]:
+    """Call LLM with Gemini Flash primary, DeepSeek V3 fallback.
+
+    Returns (response_text, model_used, provider_used).
+    """
+    channel = f"suggestion_stream:{session_id}"
+    last_error = None
+
+    # Provider 1: Gemini Flash
+    try:
+        genai.configure(api_key=settings.gemini_api_key)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        full_response = ""
+        response = model.generate_content(prompt, stream=True)
+        for chunk in response:
+            if chunk.text:
+                full_response += chunk.text
+                _redis.publish(channel, json.dumps({
+                    "type": "suggestion.stream",
+                    "comment_id": comment_id,
+                    "chunk": chunk.text,
+                }))
+        if full_response.strip():
+            return full_response, "gemini-2.0-flash", "google"
+    except Exception as e:
+        last_error = e
+        logger.warning("Gemini Flash failed for comment %s: %s. Trying DeepSeek...", comment_id, e)
+
+    # Provider 2: DeepSeek V3
+    if settings.deepseek_api_key:
+        try:
+            import httpx
+            resp = httpx.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.deepseek_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 200,
+                    "stream": False,
+                },
+                timeout=20.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text_out = data["choices"][0]["message"]["content"]
+            if text_out.strip():
+                _redis.publish(channel, json.dumps({
+                    "type": "suggestion.stream",
+                    "comment_id": comment_id,
+                    "chunk": text_out,
+                }))
+                return text_out, "deepseek-chat", "deepseek"
+        except Exception as e:
+            last_error = e
+            logger.warning("DeepSeek also failed for comment %s: %s", comment_id, e)
+
+    # Both failed
+    logger.error("All LLM providers failed for comment %s. Last error: %s", comment_id, last_error)
+    return "", "none", "none"
+
+
 # --- Main task ---
 
 
@@ -317,27 +387,11 @@ def _do_generate(comment_id: int, session_id: int, shop_id: int) -> dict:
         # 9. Build prompt
         prompt = _build_prompt(persona, comment_text, products, faqs, history)
 
-        # 10. Call Gemini Flash with streaming
-        genai.configure(api_key=settings.gemini_api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
-
-        full_response = ""
+        # 10. Call LLM with fallback: Gemini Flash → DeepSeek V3
         start_time = time.time()
-        channel = f"suggestion_stream:{session_id}"
-
-        response = model.generate_content(prompt, stream=True)
-        for chunk in response:
-            if chunk.text:
-                full_response += chunk.text
-                _redis.publish(
-                    channel,
-                    json.dumps({
-                        "type": "suggestion.stream",
-                        "comment_id": comment_id,
-                        "chunk": chunk.text,
-                    }),
-                )
-
+        full_response, llm_model_used, llm_provider_used = _call_llm_with_fallback(
+            prompt, comment_id, session_id,
+        )
         latency_ms = int((time.time() - start_time) * 1000)
 
         if not full_response.strip():
@@ -361,8 +415,8 @@ def _do_generate(comment_id: int, session_id: int, shop_id: int) -> dict:
                 "session_id": session_id,
                 "shop_id": shop_id,
                 "text": full_response,
-                "llm_model": "gemini-2.0-flash",
-                "llm_provider": "google",
+                "llm_model": llm_model_used,
+                "llm_provider": llm_provider_used,
                 "latency_ms": latency_ms,
                 "rag_product_ids": [p["id"] for p in products] if products else None,
                 "rag_faq_ids": [f["id"] for f in faqs] if faqs else None,
@@ -427,7 +481,7 @@ def _do_generate(comment_id: int, session_id: int, shop_id: int) -> dict:
         }
 
 
-@app.task(name="tasks.llm.classify_intent")
+@app.task(name="tasks.llm.classify_intent", soft_time_limit=15)
 def classify_intent(comment_id: int, text_: str) -> dict:
     """Classify comment intent (standalone task, rarely used — inline is preferred)."""
     intent, confidence = _classify_intent(text_)

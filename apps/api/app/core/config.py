@@ -31,9 +31,27 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
 
+    extension_id: str = ""
+
     sentry_dsn: str = ""
 
-    model_config = {"env_file": "../../.env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": "../../.env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = Settings()
+
+
+def validate_production_settings() -> None:
+    """Raise on dangerous defaults in non-development environments."""
+    if settings.app_env == "development":
+        return
+    if settings.jwt_secret == "change-me-in-production":
+        raise RuntimeError(
+            "JWT_SECRET must be changed from default in production. "
+            "Set the JWT_SECRET environment variable."
+        )
+    if not settings.google_client_id:
+        import logging
+        logging.getLogger(__name__).warning(
+            "GOOGLE_CLIENT_ID not set — Google OAuth will return 503"
+        )

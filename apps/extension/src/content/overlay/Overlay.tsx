@@ -21,6 +21,7 @@ export function Overlay({ onSendAction, onSaveAsFaq, onReadAloud, onPauseSession
   const [stats, setStats] = useState({ duration: 0, comments: 0, suggestions: 0 });
   const [streamingText, setStreamingText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  const [showSummary, setShowSummary] = useState(false);
   const overlayRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
   const dragOffset = useRef({ x: 0, y: 0 });
@@ -211,18 +212,45 @@ export function Overlay({ onSendAction, onSaveAsFaq, onReadAloud, onPauseSession
               onReadAloud={onReadAloud}
             />
             <HistoryList entries={history} />
-            <div class="aco-session-controls">
-              <button class="aco-btn aco-btn-secondary" onClick={onPauseSession} style="flex:1">
-                Tạm dừng
-              </button>
-              <button
-                class="aco-btn aco-btn-secondary"
-                onClick={onEndSession}
-                style="flex:1;color:#EF4444"
-              >
-                Kết thúc
-              </button>
-            </div>
+
+            {showSummary ? (
+              <div class="aco-session-summary" style="padding:12px;background:#F9FAFB;border-top:1px solid #E5E7EB;">
+                <p style="font-weight:600;font-size:13px;margin-bottom:8px;">Tổng kết phiên live</p>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;margin-bottom:10px;">
+                  <div>Thời gian: <strong>{formatDuration(stats.duration)}</strong></div>
+                  <div>Comments: <strong>{stats.comments}</strong></div>
+                  <div>Gợi ý AI: <strong>{stats.suggestions}</strong></div>
+                  <div>Đã gửi: <strong>{history.filter((h) => h.action === 'sent').length}</strong></div>
+                  <div>Đã đọc: <strong>{history.filter((h) => h.action === 'read').length}</strong></div>
+                  <div>Bỏ qua: <strong>{history.filter((h) => h.action === 'dismissed').length}</strong></div>
+                </div>
+                <div style="display:flex;gap:8px;">
+                  <button class="aco-btn aco-btn-secondary" onClick={() => setShowSummary(false)} style="flex:1">
+                    Quay lại
+                  </button>
+                  <button
+                    class="aco-btn"
+                    onClick={onEndSession}
+                    style="flex:1;background:#EF4444;color:#fff;"
+                  >
+                    Xác nhận kết thúc
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div class="aco-session-controls">
+                <button class="aco-btn aco-btn-secondary" onClick={onPauseSession} style="flex:1">
+                  Tạm dừng
+                </button>
+                <button
+                  class="aco-btn aco-btn-secondary"
+                  onClick={() => setShowSummary(true)}
+                  style="flex:1;color:#EF4444"
+                >
+                  Kết thúc
+                </button>
+              </div>
+            )}
           </>
         )}
       </div>

@@ -87,7 +87,9 @@ async def get_current_shop(
         )
 
     # Set PostgreSQL session variable for RLS
-    await db.execute(text("SET LOCAL app.current_shop_id = :sid"), {"sid": x_shop_id})
+    # SET LOCAL does not support parameterized values in asyncpg;
+    # x_shop_id is already validated as int by FastAPI/Header, so safe to interpolate.
+    await db.execute(text(f"SET LOCAL app.current_shop_id = '{int(x_shop_id)}'"))
 
     return ShopContext(user_id=current_user.user_id, shop_id=x_shop_id, role=role)
 

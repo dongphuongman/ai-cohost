@@ -1,3 +1,4 @@
+import { initSentry } from '@/lib/sentry';
 import { wsClient } from '@/lib/ws-client';
 import { getAuthToken } from '@/lib/auth';
 import {
@@ -7,6 +8,8 @@ import {
   type ActiveSession,
 } from '@/lib/storage';
 import type { WSServerMessage } from '@/types/messages';
+
+initSentry();
 
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[AI Co-host] Extension installed');

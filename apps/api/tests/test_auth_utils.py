@@ -50,6 +50,8 @@ def test_refresh_token_roundtrip():
     payload = decode_token(token)
     assert payload["sub"] == "7"
     assert payload["type"] == "refresh"
+    assert "jti" in payload
+    assert len(payload["jti"]) == 32  # uuid4 hex
 
 
 def test_reset_token_roundtrip():
@@ -57,6 +59,8 @@ def test_reset_token_roundtrip():
     payload = decode_token(token)
     assert payload["sub"] == "99"
     assert payload["type"] == "reset"
+    assert "jti" in payload
+    assert len(payload["jti"]) == 32  # uuid4 hex
 
 
 def test_get_token_expiry_seconds():

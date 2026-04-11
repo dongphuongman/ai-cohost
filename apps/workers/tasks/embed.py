@@ -27,7 +27,7 @@ def _get_embedding(content: str, task_type: str = "RETRIEVAL_DOCUMENT") -> list[
     return result["embedding"]  # 768 dimensions
 
 
-@app.task(name="tasks.embed.embed_product", max_retries=3, default_retry_delay=10)
+@app.task(name="tasks.embed.embed_product", max_retries=3, default_retry_delay=10, soft_time_limit=30)
 def embed_product(product_id: int) -> dict:
     """Generate and store embedding for a product."""
     try:
@@ -89,7 +89,7 @@ def embed_product(product_id: int) -> dict:
         raise embed_product.retry(exc=exc)
 
 
-@app.task(name="tasks.embed.embed_faq", max_retries=3, default_retry_delay=10)
+@app.task(name="tasks.embed.embed_faq", max_retries=3, default_retry_delay=10, soft_time_limit=30)
 def embed_faq(faq_id: int) -> dict:
     """Generate and store embedding for a product FAQ."""
     try:

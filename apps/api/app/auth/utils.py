@@ -1,19 +1,21 @@
+import uuid
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
+import redis.asyncio as aioredis
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from app.core.config import settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_redis = aioredis.from_url(settings.redis_url)
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
 def create_access_token(user_id: int, shop_ids: list[int]) -> str:
@@ -32,21 +34,37 @@ def create_access_token(user_id: int, shop_ids: list[int]) -> str:
 def create_refresh_token(user_id: int) -> str:
     now = datetime.now(timezone.utc)
     expire = now + timedelta(days=settings.jwt_refresh_expire_days)
+    jti = uuid.uuid4().hex
     payload = {
         "sub": str(user_id),
         "type": "refresh",
+        "jti": jti,
         "iat": now,
         "exp": expire,
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
+async def consume_refresh_jti(jti: str, expire_days: int | None = None) -> bool:
+    """Mark a refresh token JTI as used. Returns True if it was unused (valid).
+
+    Uses Redis SETNX to ensure single-use: the first call returns True,
+    subsequent calls return False (token replay detected).
+    """
+    ttl = (expire_days or settings.jwt_refresh_expire_days) * 86400
+    key = f"rt_used:{jti}"
+    was_new = await _redis.set(key, "1", nx=True, ex=ttl)
+    return was_new is not None
+
+
 def create_reset_token(user_id: int) -> str:
     now = datetime.now(timezone.utc)
     expire = now + timedelta(hours=1)
+    jti = uuid.uuid4().hex
     payload = {
         "sub": str(user_id),
         "type": "reset",
+        "jti": jti,
         "iat": now,
         "exp": expire,
     }
