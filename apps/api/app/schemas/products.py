@@ -1,6 +1,15 @@
+import re
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _strip_html(v: str | None) -> str | None:
+    if v is None:
+        return v
+    clean = re.sub(r"<[^>]+>", "", str(v))
+    clean = re.sub(r"javascript:", "", clean, flags=re.IGNORECASE)
+    return clean.strip()
 
 
 # --- Product ---
@@ -16,6 +25,18 @@ class ProductCreate(BaseModel):
     external_url: str | None = None
     category: str | None = None
 
+    @field_validator("name", "description", mode="before")
+    @classmethod
+    def strip_html(cls, v: str | None) -> str | None:
+        return _strip_html(v)
+
+    @field_validator("highlights", mode="before")
+    @classmethod
+    def strip_html_highlights(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        return [_strip_html(item) or "" for item in v]
+
 
 class ProductUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=500)
@@ -27,6 +48,18 @@ class ProductUpdate(BaseModel):
     external_url: str | None = None
     category: str | None = None
     is_active: bool | None = None
+
+    @field_validator("name", "description", mode="before")
+    @classmethod
+    def strip_html(cls, v: str | None) -> str | None:
+        return _strip_html(v)
+
+    @field_validator("highlights", mode="before")
+    @classmethod
+    def strip_html_highlights(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        return [_strip_html(item) or "" for item in v]
 
 
 class ProductResponse(BaseModel):
