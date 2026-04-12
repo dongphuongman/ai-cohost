@@ -92,6 +92,28 @@ _QUESTION = re.compile(
     re.IGNORECASE,
 )
 
+# Strong question signals — used as a guardrail to prevent greeting/praise
+# patterns from swallowing real buying-intent questions like
+# "Shop ơi giá bao nhiêu vậy ạ?" or "Có mùi thơm không shop ơi?".
+# Anything matching this MUST be routed to AI even if it also looks like a
+# greeting or praise, since shop owners care about question reply rate.
+_STRONG_QUESTION_WORDS = re.compile(
+    r"(\bbao nhiêu\b|\bbao nhieu\b|\bthế nào\b|\bthe nao\b|\bkhi nào\b|\bở đâu\b|"
+    r"\bcái nào\b|\bloại nào\b|\blàm sao\b|\bcó\s+(không|chưa|được|ship|bán|tester|combo|sỉ)\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_question(text_stripped: str) -> bool:
+    """True if comment is clearly a question (mark or question-word).
+
+    Used as a universal guardrail: greeting/praise checks must NOT skip_ai
+    a comment that is asking something — that loses sales.
+    """
+    if "?" in text_stripped:
+        return True
+    return bool(_STRONG_QUESTION_WORDS.search(text_stripped))
+
 
 def classify_rule_based(text: str, shop_rules: ShopRules | None = None) -> ClassifyResult:
     """Fast classification — runs on every comment. Target: <1ms."""
@@ -169,14 +191,30 @@ def classify_rule_based(text: str, shop_rules: ShopRules | None = None) -> Class
 
     # --- Blacklisted user (checked at caller level usually, but also here for safety) ---
 
+    # Universal guardrail: real questions never get skipped, even if they
+    # also superficially match a greeting/praise pattern (e.g.
+    # "Shop ơi giá bao nhiêu vậy ạ?" — starts with "shop ơi" but is a
+    # pricing question with high buying intent).
+    is_question = _is_question(text_stripped)
+
     # --- Greeting ---
     if (_GREETING.search(text_stripped) or _JOINING.search(text_stripped)) and len(text_stripped) < 40:
+        if is_question:
+            return ClassifyResult(
+                intent="question", confidence=0.7, action="generate_ai",
+                reason="Greeting prefix but contains question — route to AI",
+            )
         return ClassifyResult(intent="greeting", confidence=0.8, action="skip_ai")
 
     # --- Praise ---
     if _PRAISE.search(text_stripped) or _PRAISE_EMOJI.search(text_stripped):
         # Only pure praise if short
         if len(text_stripped) < 50:
+            if is_question:
+                return ClassifyResult(
+                    intent="question", confidence=0.7, action="generate_ai",
+                    reason="Praise tokens but contains question — route to AI",
+                )
             return ClassifyResult(intent="praise", confidence=0.7, action="skip_ai")
 
     # --- Pricing questions ---
