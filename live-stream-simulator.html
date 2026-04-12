@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Live Stream Simulator — AI Co-host Testing</title>
+<style>
+  :root {
+    --bg: #18191a;
+    --surface: #242526;
+    --surface-hover: #3a3b3c;
+    --text: #e4e6eb;
+    --text-secondary: #b0b3b8;
+    --primary: #2d88ff;
+    --danger: #f02849;
+    --success: #31a24c;
+    --border: #3e4042;
+    --comment-bg: #3a3b3c;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    height: 100vh;
+  }
+
+  /* ===== VIDEO AREA ===== */
+  .video-area {
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+
+  .live-badge {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    background: var(--danger);
+    color: white;
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    z-index: 10;
+  }
+
+  .live-badge::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    background: white;
+    border-radius: 50%;
+    animation: pulse 1.5s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .viewer-count {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    background: rgba(0,0,0,0.7);
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .video-placeholder {
+    color: #666;
+    text-align: center;
+  }
+
+  .video-placeholder h2 {
+    font-size: 24px;
+    margin-bottom: 8px;
+    color: #888;
+  }
+
+  .video-placeholder p {
+    font-size: 14px;
+    color: #555;
+  }
+
+  /* ===== CHAT PANEL ===== */
+  .chat-panel {
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border);
+  }
+
+  .chat-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .chat-header h3 {
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .chat-header .comment-count {
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+
+  /* Chat messages area - THIS IS WHAT EXTENSION READS */
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 16px;
+    scroll-behavior: smooth;
+  }
+
+  /* 
+   * IMPORTANT: These class names and structure simulate Facebook Live chat.
+   * The extension's Facebook adapter looks for these patterns.
+   * data-testid="UFI2Comment/root_depth_0" is the key selector.
+   */
+  .chat-message {
+    display: flex;
+    gap: 8px;
+    padding: 4px 0;
+    animation: fadeIn 0.3s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .chat-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+    color: white;
+    flex-shrink: 0;
+  }
+
+  .chat-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .chat-author {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--primary);
+    cursor: pointer;
+  }
+
+  .chat-author:hover { text-decoration: underline; }
+
+  .chat-text {
+    font-size: 14px;
+    color: var(--text);
+    word-wrap: break-word;
+    line-height: 1.4;
+  }
+
+  .chat-time {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+  }
+
+  /* Chat input - THIS IS WHERE EXTENSION PASTES */
+  .chat-input-area {
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+  }
+
+  /*
+   * CRITICAL: This is the element the extension's smartPaste targets.
+   * contenteditable="true" + role="textbox" matches Facebook's chat input.
+   */
+  .chat-input {
+    flex: 1;
+    background: var(--comment-bg);
+    border: none;
+    border-radius: 20px;
+    padding: 8px 16px;
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+    min-height: 36px;
+    max-height: 120px;
+    overflow-y: auto;
+    line-height: 1.4;
+  }
+
+  .chat-input:empty::before {
+    content: 'Viết bình luận...';
+    color: var(--text-secondary);
+  }
+
+  .chat-input:focus {
+    background: var(--surface-hover);
+  }
+
+  .send-button {
+    background: none;
+    border: none;
+    color: var(--primary);
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .send-button:hover { background: var(--surface-hover); }
+
+  .send-button svg { width: 20px; height: 20px; fill: currentColor; }
+
+  /* ===== CONTROL PANEL ===== */
+  .controls {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(transparent, rgba(0,0,0,0.95));
+    padding: 80px 24px 24px;
+  }
+
+  .controls-inner {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .ctrl-btn {
+    padding: 8px 16px;
+    border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(255,255,255,0.1);
+    color: white;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s;
+  }
+
+  .ctrl-btn:hover { background: rgba(255,255,255,0.2); }
+
+  .ctrl-btn.active {
+    background: var(--primary);
+    border-color: var(--primary);
+  }
+
+  .ctrl-btn.danger { border-color: var(--danger); }
+  .ctrl-btn.danger:hover { background: var(--danger); }
+
+  .ctrl-select {
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.2);
+    color: white;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .ctrl-input {
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.2);
+    color: white;
+    border-radius: 8px;
+    font-size: 13px;
+    width: 60px;
+    text-align: center;
+  }
+
+  .ctrl-label {
+    font-size: 12px;
+    color: rgba(255,255,255,0.6);
+  }
+
+  .ctrl-divider {
+    width: 1px;
+    height: 32px;
+    background: rgba(255,255,255,0.15);
+  }
+
+  /* Status bar */
+  .status-bar {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 16px;
+    background: rgba(0,0,0,0.7);
+    padding: 8px 20px;
+    border-radius: 8px;
+    font-size: 12px;
+    z-index: 5;
+  }
+
+  .status-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--success);
+  }
+
+  .status-dot.off { background: var(--text-secondary); }
+  .status-dot.warn { background: #f7b928; }
+
+  /* Info panel */
+  .info-panel {
+    position: absolute;
+    top: 60px;
+    left: 16px;
+    background: rgba(0,0,0,0.75);
+    padding: 12px 16px;
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    max-width: 360px;
+    color: rgba(255,255,255,0.8);
+    z-index: 5;
+  }
+
+  .info-panel h4 {
+    color: white;
+    font-size: 13px;
+    margin-bottom: 6px;
+  }
+
+  .info-panel code {
+    background: rgba(255,255,255,0.1);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 11px;
+  }
+
+  /* ===== SCROLLBAR ===== */
+  .chat-messages::-webkit-scrollbar { width: 6px; }
+  .chat-messages::-webkit-scrollbar-track { background: transparent; }
+  .chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="layout">
+  <!-- Video Area -->
+  <div class="video-area">
+    <div class="live-badge" data-testid="live_video_badge">LIVE</div>
+    <div class="viewer-count">👁 <span id="viewerCount">847</span> người xem</div>
+
+    <div class="status-bar">
+      <div class="status-item">
+        <div class="status-dot" id="statusAutoComment"></div>
+        <span>Auto Comment</span>
+      </div>
+      <div class="status-item">
+        <div class="status-dot off" id="statusExtension"></div>
+        <span>Extension</span>
+      </div>
+      <div class="status-item">
+        <span id="commentCounter">0</span> comments
+      </div>
+      <div class="status-item">
+        <span id="elapsedTime">00:00</span>
+      </div>
+    </div>
+
+    <div class="info-panel">
+      <h4>🧪 Live Stream Simulator</h4>
+      Trang này giả lập giao diện Facebook Live để test extension AI Co-host.<br><br>
+      <strong>Cách test:</strong><br>
+      1. Load extension vào Chrome (<code>chrome://extensions</code>)<br>
+      2. Mở trang này, extension sẽ detect "Live"<br>
+      3. Bật Auto Comment để simulate viewers<br>
+      4. Extension sẽ đọc comments từ chat panel<br>
+      5. Test Quick Paste: reply sẽ paste vào ô comment dưới
+    </div>
+
+    <div class="controls">
+      <div class="controls-inner">
+        <button class="ctrl-btn active" id="btnAutoComment" onclick="toggleAutoComment()">
+          💬 Auto Comment
+        </button>
+
+        <div class="ctrl-divider"></div>
+
+        <span class="ctrl-label">Tốc độ:</span>
+        <select class="ctrl-select" id="commentSpeed" onchange="updateSpeed()">
+          <option value="5000">Chậm (5s)</option>
+          <option value="3000" selected>Bình thường (3s)</option>
+          <option value="1000">Nhanh (1s)</option>
+          <option value="500">Rất nhanh (0.5s)</option>
+        </select>
+
+        <div class="ctrl-divider"></div>
+
+        <button class="ctrl-btn" onclick="addBurstComments()">
+          🔥 Burst 10 comments
+        </button>
+
+        <button class="ctrl-btn" onclick="addSpecificComment('question')">
+          ❓ Thêm câu hỏi
+        </button>
+
+        <button class="ctrl-btn" onclick="addSpecificComment('spam')">
+          🚫 Thêm spam
+        </button>
+
+        <button class="ctrl-btn" onclick="addSpecificComment('greeting')">
+          👋 Thêm chào
+        </button>
+
+        <div class="ctrl-divider"></div>
+
+        <button class="ctrl-btn danger" onclick="clearChat()">
+          🗑 Xóa chat
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat Panel -->
+  <div class="chat-panel">
+    <div class="chat-header">
+      <h3>Bình luận trực tiếp</h3>
+      <span class="comment-count" id="chatCommentCount">0 bình luận</span>
+    </div>
+
+    <!-- THIS IS THE CHAT CONTAINER THE EXTENSION OBSERVES -->
+    <div class="chat-messages" id="chatMessages" role="log" aria-label="Comment">
+      <!-- Comments will be injected here -->
+    </div>
+
+    <!-- THIS IS THE INPUT THE EXTENSION PASTES INTO -->
+    <div class="chat-input-area">
+      <div
+        class="chat-input"
+        id="chatInput"
+        contenteditable="true"
+        role="textbox"
+        aria-label="Viết bình luận..."
+        data-testid="comment_input"
+      ></div>
+      <button class="send-button" onclick="sendManualComment()" aria-label="Bình luận">
+        <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ===== VIETNAMESE COMMENT DATA =====
+
+const USERNAMES = [
+  "Nguyễn Thị Hương", "Trần Văn Nam", "Lê Thị Mai", "Phạm Đức Anh",
+  "Hoàng Thị Lan", "Vũ Minh Tuấn", "Đặng Thu Hà", "Bùi Quang Huy",
+  "Ngô Thị Linh", "Đỗ Văn Thắng", "Phan Thị Ngọc", "Lý Hoàng Long",
+  "Trịnh Thị Tâm", "Mai Văn Đức", "Dương Thị Hồng", "Cao Minh Phúc",
+  "Hồ Thị Yến", "Lương Văn Bình", "Tạ Thị Dung", "Đinh Công Thành"
+];
+
+const COMMENTS = {
+  question: [
+    "Shop ơi giá bao nhiêu vậy ạ?",
+    "Có ship COD không shop?",
+    "Da dầu mụn dùng được không ạ?",
+    "Bao lâu thì thoa lại 1 lần shop?",
+    "Có mùi thơm không shop ơi?",
+    "Dùng cho da nhạy cảm được không?",
+    "Hạn sử dụng còn bao lâu ạ?",
+    "Có giấy chứng nhận FDA không shop?",
+    "Đang có khuyến mãi gì không ạ?",
+    "Ship về Đà Nẵng mấy ngày shop?",
+    "Sản phẩm có chứa cồn không ạ?",
+    "Combo 2 cái giảm thêm không shop?",
+    "Dùng trước hay sau kem chống nắng?",
+    "Có tester gửi kèm không shop?",
+    "Thanh toán qua Momo được không?",
+    "Đổi trả trong bao nhiêu ngày shop?",
+    "Sản phẩm origin ở đâu vậy?",
+    "Có hướng dẫn sử dụng không shop?",
+    "Bên em có bán sỉ không ạ?",
+    "Mình đặt 3 cái free ship luôn không?"
+  ],
+  greeting: [
+    "Chào shop ơi! 🎉",
+    "Hi shop, mình mới vào nè",
+    "Xin chào mọi người!",
+    "Shop ơi live rồi à, vào ngay 😍",
+    "Chào cả nhà!",
+    "Hello shop! 👋",
+    "Alo alo, có ai không?",
+    "Mới vào, có gì hot không shop?"
+  ],
+  praise: [
+    "Xinh quá shop ơi! 😍",
+    "Sản phẩm đẹp thật!",
+    "Thích quá luôn! ❤️",
+    "Mình dùng rồi, tốt lắm ạ!",
+    "Đỉnh quá shop ơi 🔥",
+    "Xem live shop vui quá 😊",
+    "Ủng hộ shop nè ❤️",
+    "Review hay quá!",
+    "👍👍👍",
+    "🔥🔥🔥🔥🔥"
+  ],
+  spam: [
+    "Vào link bio mình để nhận quà free nè https://spam.link/abc",
+    "GIẢM 90% TẤT CẢ SẢN PHẨM → t.me/spamgroup",
+    "Inbox mình để được tư vấn miễn phí wa.me/123456",
+    "🎰🎰🎰 KIẾM TIỀN ONLINE TẠI NHÀ 🎰🎰🎰",
+    "Shop kia bán rẻ hơn nhiều, link đây...",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "aaaaaaaaaaaaaaaaaaaaa",
+    "Follow mình follow lại nha @@@"
+  ],
+  complaint: [
+    "Mình mua lần trước bị dị ứng luôn!",
+    "Ship chậm quá, đợi 1 tuần chưa nhận",
+    "Hàng giao không giống hình!",
+    "Tại sao giá hôm nay khác hôm qua?"
+  ]
+};
+
+// Random weighted selection
+function randomComment() {
+  const weights = { question: 40, greeting: 15, praise: 25, spam: 10, complaint: 10 };
+  const total = Object.values(weights).reduce((a, b) => a + b, 0);
+  let rand = Math.random() * total;
+  
+  for (const [type, weight] of Object.entries(weights)) {
+    rand -= weight;
+    if (rand <= 0) {
+      const list = COMMENTS[type];
+      return {
+        type,
+        text: list[Math.floor(Math.random() * list.length)],
+        user: USERNAMES[Math.floor(Math.random() * USERNAMES.length)]
+      };
+    }
+  }
+  return { type: 'question', text: COMMENTS.question[0], user: USERNAMES[0] };
+}
+
+// ===== STATE =====
+let autoCommentEnabled = true;
+let autoCommentInterval = null;
+let commentCount = 0;
+let startTime = Date.now();
+let viewerCount = 847;
+
+// ===== FUNCTIONS =====
+
+function addComment(user, text, type = 'normal') {
+  const chatMessages = document.getElementById('chatMessages');
+  
+  const initials = user.split(' ').map(w => w[0]).join('').slice(0, 2);
+  const colors = ['#2d88ff', '#f02849', '#31a24c', '#f7b928', '#a855f7', '#ec4899'];
+  const color = colors[user.charCodeAt(0) % colors.length];
+  const time = new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  
+  // Create comment element matching Facebook Live DOM structure
+  const comment = document.createElement('div');
+  comment.className = 'chat-message';
+  comment.setAttribute('data-testid', 'UFI2Comment/root_depth_0');
+  comment.setAttribute('data-comment-type', type);
+  comment.setAttribute('data-comment-time', new Date().toISOString());
+  
+  comment.innerHTML = `
+    <div class="chat-avatar" style="background:${color}">${initials}</div>
+    <div class="chat-content">
+      <span class="chat-author" dir="auto"><a role="link">${user}</a></span>
+      <div class="chat-text" dir="auto" style="color: var(--text)">${escapeHtml(text)}</div>
+      <div class="chat-time">${time}</div>
+    </div>
+  `;
+  
+  chatMessages.appendChild(comment);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  
+  commentCount++;
+  document.getElementById('commentCounter').textContent = commentCount;
+  document.getElementById('chatCommentCount').textContent = `${commentCount} bình luận`;
+  
+  // Update viewer count randomly
+  viewerCount += Math.floor(Math.random() * 5) - 2;
+  viewerCount = Math.max(100, viewerCount);
+  document.getElementById('viewerCount').textContent = viewerCount;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function addSpecificComment(type) {
+  const list = COMMENTS[type];
+  const text = list[Math.floor(Math.random() * list.length)];
+  const user = USERNAMES[Math.floor(Math.random() * USERNAMES.length)];
+  addComment(user, text, type);
+}
+
+function addBurstComments() {
+  let i = 0;
+  const burst = setInterval(() => {
+    const { user, text, type } = randomComment();
+    addComment(user, text, type);
+    i++;
+    if (i >= 10) clearInterval(burst);
+  }, 200);
+}
+
+function toggleAutoComment() {
+  autoCommentEnabled = !autoCommentEnabled;
+  const btn = document.getElementById('btnAutoComment');
+  const dot = document.getElementById('statusAutoComment');
+  
+  if (autoCommentEnabled) {
+    btn.classList.add('active');
+    dot.classList.remove('off');
+    startAutoComment();
+  } else {
+    btn.classList.remove('active');
+    dot.classList.add('off');
+    if (autoCommentInterval) clearInterval(autoCommentInterval);
+  }
+}
+
+function startAutoComment() {
+  if (autoCommentInterval) clearInterval(autoCommentInterval);
+  
+  const speed = parseInt(document.getElementById('commentSpeed').value);
+  autoCommentInterval = setInterval(() => {
+    if (!autoCommentEnabled) return;
+    const { user, text, type } = randomComment();
+    addComment(user, text, type);
+  }, speed);
+}
+
+function updateSpeed() {
+  if (autoCommentEnabled) startAutoComment();
+}
+
+function clearChat() {
+  document.getElementById('chatMessages').innerHTML = '';
+  commentCount = 0;
+  document.getElementById('commentCounter').textContent = '0';
+  document.getElementById('chatCommentCount').textContent = '0 bình luận';
+}
+
+function sendManualComment() {
+  const input = document.getElementById('chatInput');
+  const text = input.textContent.trim();
+  if (!text) return;
+  
+  addComment('Bạn (Host)', text, 'host');
+  input.textContent = '';
+  input.focus();
+}
+
+// Handle Enter key in chat input
+document.getElementById('chatInput').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendManualComment();
+  }
+});
+
+// Update elapsed time
+setInterval(() => {
+  const elapsed = Math.floor((Date.now() - startTime) / 1000);
+  const min = Math.floor(elapsed / 60).toString().padStart(2, '0');
+  const sec = (elapsed % 60).toString().padStart(2, '0');
+  document.getElementById('elapsedTime').textContent = `${min}:${sec}`;
+}, 1000);
+
+// Detect if extension is present
+setInterval(() => {
+  const extensionOverlay = document.querySelector('[class*="ai-cohost"], [id*="ai-cohost"], [data-extension="ai-cohost"]');
+  const dot = document.getElementById('statusExtension');
+  if (extensionOverlay) {
+    dot.classList.remove('off');
+    dot.classList.add('warn');
+  }
+}, 2000);
+
+// Start auto comments
+startAutoComment();
+
+// Add initial comments
+setTimeout(() => addComment('Nguyễn Thị Hương', 'Chào shop ơi! Mình mới vào nè 😍', 'greeting'), 500);
+setTimeout(() => addComment('Trần Văn Nam', 'Hôm nay có deal gì hot không shop?', 'question'), 1200);
+setTimeout(() => addComment('Lê Thị Mai', 'Ủng hộ shop nè ❤️', 'praise'), 2000);
+</script>
+</body>
+</html>

@@ -8,10 +8,29 @@ Adds a boolean flag distinguishing host/bot comments from viewer comments so
 analytics can exclude them from intent classification, top-question
 aggregation, and "frequently asked" rollups.
 
-- Default false: existing rows are treated as viewer comments.
-- A backfill heuristic flips well-known bot reply prefixes ("Dạ, chị/em ơi",
-  "Dạ shop", "Cảm ơn bạn") to is_from_host = true and clears their intent so
-  they no longer pollute analytics. Test on a dev DB before promoting.
+Production-safety notes
+-----------------------
+This migration is split into online-safe primitives:
+
+- ``ADD COLUMN ... DEFAULT false`` is metadata-only on PostgreSQL 11+ and
+  does not rewrite the table.
+- The partial index is built with ``CREATE INDEX CONCURRENTLY`` outside the
+  alembic transaction (AUTOCOMMIT isolation) so writes to ``comments`` are
+  not blocked during deploy.
+- The ILIKE backfill heuristic is **not** run here. Ship the column, then
+  run ``apps/api/scripts/backfill_self_replies.py`` out-of-band in a
+  low-traffic window. Running it inside the migration held ACCESS
+  EXCLUSIVE-adjacent locks on the hottest write table in the product and
+  was the original deploy-lock risk this split is fixing.
+
+Downgrade note
+--------------
+**This migration is forward-only in practice.** The ILIKE backfill clears
+``intent = NULL`` for matched rows; dropping the column does not restore
+the prior intent values, so a rollback permanently loses analytics
+classification for every row the backfill touched. The ``downgrade()``
+function is provided only so alembic's history machinery is well-formed;
+do not use it to recover from a bad deploy.
 """
 from typing import Sequence, Union
 
@@ -25,30 +44,35 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Metadata-only on PG 11+, takes a brief ACCESS EXCLUSIVE lock.
     op.execute(
         "ALTER TABLE comments "
         "ADD COLUMN is_from_host BOOLEAN NOT NULL DEFAULT false"
     )
-    op.execute(
-        "CREATE INDEX comments_session_viewer_idx "
-        "ON comments (session_id) WHERE is_from_host = false"
-    )
 
-    # Backfill: mark obvious bot replies and clear their intent so they stop
-    # being counted as viewer questions/complaints in analytics.
-    op.execute(
-        """
-        UPDATE comments
-           SET is_from_host = true,
-               intent = NULL
-         WHERE text ILIKE 'Dạ, chị/em ơi%'
-            OR text ILIKE 'Dạ shop%'
-            OR text ILIKE 'Cảm ơn bạn%'
-            OR text ILIKE 'Dạ vâng%'
-        """
-    )
+    # CREATE INDEX CONCURRENTLY must run outside a transaction. Alembic
+    # opens one by default; escape it with AUTOCOMMIT isolation for this
+    # statement only. IF NOT EXISTS guards against retries after a partial
+    # build (CONCURRENTLY can leave INVALID indexes around on failure).
+    bind = op.get_bind()
+    with bind.execution_options(isolation_level="AUTOCOMMIT"):
+        bind.exec_driver_sql(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+            "comments_session_viewer_idx "
+            "ON comments (session_id) WHERE is_from_host = false"
+        )
+
+    # Backfill intentionally NOT run here. See module docstring.
 
 
 def downgrade() -> None:
-    op.execute("DROP INDEX IF EXISTS comments_session_viewer_idx")
+    # Forward-only migration — see module docstring. This path exists
+    # purely so alembic history is well-formed. Running it after a real
+    # upgrade will permanently discard any intent values the offline
+    # backfill cleared.
+    bind = op.get_bind()
+    with bind.execution_options(isolation_level="AUTOCOMMIT"):
+        bind.exec_driver_sql(
+            "DROP INDEX CONCURRENTLY IF EXISTS comments_session_viewer_idx"
+        )
     op.execute("ALTER TABLE comments DROP COLUMN IF EXISTS is_from_host")

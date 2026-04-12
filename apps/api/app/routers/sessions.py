@@ -10,7 +10,7 @@ from app.services.auto_reply import toggle_auto_reply
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
-@router.get("/")
+@router.get("")
 async def list_sessions(
     limit: int = 20,
     offset: int = 0,

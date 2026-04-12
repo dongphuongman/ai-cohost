@@ -36,7 +36,7 @@ async def check_job_status(
     return result
 
 
-@router.get("/", response_model=ScriptListResponse)
+@router.get("", response_model=ScriptListResponse)
 async def list_scripts(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),

@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/voices", tags=["voices"])
 
 
-@router.get("/", response_model=list[VoiceCloneResponse])
+@router.get("", response_model=list[VoiceCloneResponse])
 async def list_voices(
     shop: ShopContext = Depends(get_current_shop),
     db: AsyncSession = Depends(get_db),
@@ -28,7 +28,7 @@ async def list_voices(
     return await list_voice_clones(db, shop.shop_id)
 
 
-@router.post("/", response_model=VoiceCloneResponse, status_code=201)
+@router.post("", response_model=VoiceCloneResponse, status_code=201)
 async def create_voice(
     name: str = Form(..., min_length=1, max_length=200),
     consent_person_name: str = Form(..., min_length=2, max_length=200),

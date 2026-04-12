@@ -62,6 +62,11 @@ app = FastAPI(
     docs_url="/docs" if settings.app_env == "development" else None,
     redoc_url=None,
     lifespan=lifespan,
+    # Never redirect /foo ↔ /foo/. Preflighted CORS requests cannot follow
+    # redirects (Fetch spec), so any 307 breaks the dashboard with a confusing
+    # "No Access-Control-Allow-Origin" error. Routes are registered without a
+    # trailing slash via @router.get("") in apps/api/app/routers/*.py.
+    redirect_slashes=False,
 )
 
 app.add_middleware(

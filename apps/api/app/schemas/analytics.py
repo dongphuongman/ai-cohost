@@ -147,9 +147,21 @@ class SessionComparison(BaseModel):
 # --- AI insights ---
 
 
+class InsightItem(BaseModel):
+    """A single insight card. ``action`` is optional for ``positives`` (wins
+    don't always need a follow-up); ``improvements`` and ``suggestions`` should
+    always have one.
+    """
+
+    title: str
+    detail: str
+    action: str | None = None
+
+
 class SessionInsights(BaseModel):
-    positives: list[str]
-    improvements: list[str]
-    suggestions: list[str]
+    positives: list[InsightItem]
+    improvements: list[InsightItem]
+    suggestions: list[InsightItem]
     generated_at: datetime
     cached: bool = False
+    warning: str | None = None

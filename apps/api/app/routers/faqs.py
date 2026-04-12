@@ -9,7 +9,7 @@ from app.services import faqs as faq_svc
 router = APIRouter(prefix="/products/{product_id}/faqs", tags=["faqs"])
 
 
-@router.get("/", response_model=list[FaqResponse])
+@router.get("", response_model=list[FaqResponse])
 async def list_faqs(
     product_id: int,
     shop: ShopContext = Depends(get_current_shop),
@@ -21,7 +21,7 @@ async def list_faqs(
     return result
 
 
-@router.post("/", response_model=FaqResponse, status_code=201)
+@router.post("", response_model=FaqResponse, status_code=201)
 async def create_faq(
     product_id: int,
     data: FaqCreate,

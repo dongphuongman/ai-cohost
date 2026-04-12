@@ -64,7 +64,14 @@ class Match:
 
 
 async def scan() -> list[Match]:
-    """Walk every session and collect viewer comments that match a sent suggestion."""
+    """Walk every session and collect viewer comments that match a sent suggestion.
+
+    Single-pass matching: we check each comment against the full suggestion
+    list once and record the matched suggestion id on the first hit. The
+    previous implementation re-ran ``_is_self_reply_match`` per suggestion
+    after a positive hit, doubling the work on sessions with thousands of
+    suggestions.
+    """
     matches: list[Match] = []
 
     async with async_session() as db:
@@ -84,7 +91,7 @@ async def scan() -> list[Match]:
 
     print(f"Scanning {len(session_ids)} candidate sessions...")
 
-    for sid in session_ids:
+    for idx, sid in enumerate(session_ids, start=1):
         async with async_session() as db:
             sug_rows = await db.execute(text("""
                 SELECT id, text FROM suggestions
@@ -97,21 +104,25 @@ async def scan() -> list[Match]:
                  WHERE session_id = :s AND is_from_host = false
             """), {"s": sid})
 
-            sug_texts = [t for _, t in sugs]
             for c in cmt_rows:
-                if _is_self_reply_match(c.text, sug_texts):
-                    # Find the specific suggestion that matched (for the report)
-                    matched_sid = None
-                    for sg_id, sg_text in sugs:
-                        if _is_self_reply_match(c.text, [sg_text]):
-                            matched_sid = sg_id
-                            break
+                # Single pass: walk the suggestion list directly instead
+                # of calling _is_self_reply_match twice. First hit wins.
+                matched_sid = None
+                for sg_id, sg_text in sugs:
+                    if _is_self_reply_match(c.text, [sg_text]):
+                        matched_sid = sg_id
+                        break
+                if matched_sid is not None:
                     matches.append(Match(
                         session_id=sid,
                         comment_id=c.id,
-                        suggestion_id=matched_sid or 0,
+                        suggestion_id=matched_sid,
                         text_preview=(c.text or "")[:80],
                     ))
+
+        # Observable progress for long scans (no-op on tiny DBs).
+        if idx % 25 == 0 or idx == len(session_ids):
+            print(f"  scanned {idx}/{len(session_ids)} sessions, {len(matches)} matches so far")
 
     return matches
 
@@ -134,19 +145,51 @@ def print_report(matches: list[Match]) -> None:
             print(f"    ... and {len(ms) - 5} more")
 
 
+_APPLY_BATCH_SIZE = 500
+_APPLY_BATCH_SLEEP_S = 0.05  # Yield to the live WS writer between batches.
+
+
 async def apply_matches(matches: list[Match]) -> int:
+    """Batched UPDATE with per-chunk commits.
+
+    Running one transaction across every matched id held row locks for the
+    entire update window and bloated WAL on large runs. We now chunk into
+    ``_APPLY_BATCH_SIZE`` ids at a time, commit per batch, and sleep
+    briefly between batches so the live WS insert path can interleave.
+    Matched ids are also written to ``backfill_self_replies_audit.log``
+    before the UPDATE so the change set is traceable and reversible.
+    """
     if not matches:
         return 0
+
+    # Audit log — written BEFORE any UPDATE, so a crash mid-run still
+    # leaves a record of exactly which comments were targeted.
+    from datetime import datetime, timezone
+    from pathlib import Path
+    audit_path = Path("backfill_self_replies_audit.log")
+    run_ts = datetime.now(timezone.utc).isoformat()
+    with audit_path.open("a") as f:
+        f.write(f"# run_at={run_ts} total={len(matches)}\n")
+        for m in matches:
+            f.write(f"{run_ts}\t{m.session_id}\t{m.comment_id}\t{m.suggestion_id}\n")
+    print(f"  audit log: {audit_path.resolve()}")
+
     ids = [m.comment_id for m in matches]
-    async with async_session() as db:
-        result = await db.execute(text("""
-            UPDATE comments
-               SET is_from_host = true,
-                   intent = NULL
-             WHERE id = ANY(:ids)
-        """), {"ids": ids})
-        await db.commit()
-        return result.rowcount or 0
+    total = 0
+    for start in range(0, len(ids), _APPLY_BATCH_SIZE):
+        chunk = ids[start:start + _APPLY_BATCH_SIZE]
+        async with async_session() as db:
+            result = await db.execute(text("""
+                UPDATE comments
+                   SET is_from_host = true,
+                       intent = NULL
+                 WHERE id = ANY(:ids)
+            """), {"ids": chunk})
+            await db.commit()
+            total += result.rowcount or 0
+        print(f"  applied {min(start + _APPLY_BATCH_SIZE, len(ids))}/{len(ids)}")
+        await asyncio.sleep(_APPLY_BATCH_SLEEP_S)
+    return total
 
 
 async def main():

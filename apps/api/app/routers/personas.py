@@ -13,7 +13,7 @@ from app.schemas.voices import VoiceLinkRequest
 router = APIRouter(prefix="/personas", tags=["personas"])
 
 
-@router.get("/", response_model=list[PersonaResponse])
+@router.get("", response_model=list[PersonaResponse])
 async def list_personas(
     shop: ShopContext = Depends(get_current_shop),
     db: AsyncSession = Depends(get_db),
@@ -26,7 +26,7 @@ async def list_personas(
     return result.scalars().all()
 
 
-@router.post("/", response_model=PersonaResponse, status_code=201)
+@router.post("", response_model=PersonaResponse, status_code=201)
 async def create_persona(
     data: PersonaCreate,
     shop: ShopContext = Depends(get_current_shop),

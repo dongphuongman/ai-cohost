@@ -56,7 +56,7 @@ def _slugify(name: str, suffix: int) -> str:
     return f"{slug}-{suffix}"
 
 
-@router.get("/", response_model=list[ShopResponse])
+@router.get("", response_model=list[ShopResponse])
 async def list_shops(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -70,7 +70,7 @@ async def list_shops(
     return result.scalars().all()
 
 
-@router.post("/", response_model=ShopResponse, status_code=201)
+@router.post("", response_model=ShopResponse, status_code=201)
 async def create_shop(
     data: CreateShopRequest,
     user: CurrentUser = Depends(get_current_user),

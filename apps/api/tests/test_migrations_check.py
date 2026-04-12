@@ -47,6 +47,32 @@ async def test_drift_in_production_raises(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
+async def test_drift_in_staging_raises(monkeypatch):
+    """Staging: stale schema MUST abort startup (mirrors prod data + traffic)."""
+    async def fake_status(_engine):
+        return MigrationStatus(head="0004", current="0002")
+
+    monkeypatch.setattr(migrations, "get_migration_status", fake_status)
+
+    with pytest.raises(RuntimeError, match="Database schema is out of date"):
+        await check_migrations_up_to_date(engine=None, app_env="staging")
+
+
+@pytest.mark.asyncio
+async def test_drift_in_unknown_env_raises(monkeypatch):
+    """Unknown APP_ENV (typo, unset) must fail-fast, not silently degrade."""
+    async def fake_status(_engine):
+        return MigrationStatus(head="0004", current="0002")
+
+    monkeypatch.setattr(migrations, "get_migration_status", fake_status)
+
+    with pytest.raises(RuntimeError):
+        await check_migrations_up_to_date(engine=None, app_env="prodution")  # typo
+    with pytest.raises(RuntimeError):
+        await check_migrations_up_to_date(engine=None, app_env="")
+
+
+@pytest.mark.asyncio
 async def test_drift_in_development_warns_and_returns(monkeypatch, caplog):
     """Development: stale schema logs a loud warning but does not crash."""
     async def fake_status(_engine):

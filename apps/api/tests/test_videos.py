@@ -1,5 +1,7 @@
 """Tests for digital human video schemas, validation, and service helpers."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 from pydantic import ValidationError
 
@@ -9,7 +11,13 @@ from app.schemas.videos import (
     VideoResponse,
     VideoShareResponse,
 )
-from app.services.digital_human import WORDS_PER_MINUTE, estimate_duration_minutes
+from app.services.digital_human import (
+    PREFER_QUALITY_PLANS,
+    WORDS_PER_MINUTE,
+    estimate_duration_minutes,
+    generate_video,
+)
+from app.services.usage import QuotaStatus
 
 
 # --- Schema validation tests ---
@@ -136,3 +144,84 @@ class TestWatermarkEnforcement:
 
     def test_max_text_length_constant(self):
         assert MAX_TEXT_LENGTH == 5000
+
+
+# --- prefer_quality plan-gate tests ---
+
+
+class _PlanResult:
+    """Mimic SQLAlchemy Result with ``scalar_one_or_none``."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+
+@pytest.mark.asyncio
+class TestPreferQualityPlanGate:
+    """The ``prefer_quality`` flag pins the expensive HeyGen path; only Pro/
+    Enterprise may set it. Without this gate any user could bypass the
+    LiteAvatar cost optimization (see digital_human.py:46)."""
+
+    async def _make_request(self):
+        return VideoGenerateRequest(text="Test content", prefer_quality=True)
+
+    async def test_prefer_quality_blocks_starter_plan(self):
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=_PlanResult("starter"))
+        data = await self._make_request()
+
+        ok_quota = QuotaStatus(used=0, limit=10, remaining=10)
+        with patch(
+            "app.services.digital_human.check_quota",
+            new=AsyncMock(return_value=ok_quota),
+        ):
+            with pytest.raises(ValueError, match="Pro"):
+                await generate_video(db, shop_id=1, user_id=1, data=data)
+
+        # Gate must fire before any INSERT.
+        db.add.assert_not_called()
+
+    async def test_prefer_quality_allows_pro_plan(self):
+        import sys
+        import types
+
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=_PlanResult("pro"))
+        db.add = MagicMock()
+        db.flush = AsyncMock()
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock()
+        data = await self._make_request()
+
+        ok_quota = QuotaStatus(used=0, limit=10, remaining=10)
+
+        # ``generate_video`` does ``from celery import current_app`` inline to
+        # avoid a hard dep at import time. In the test env celery may be
+        # absent, so we inject a stub module before the import fires.
+        fake_celery_module = types.ModuleType("celery")
+        fake_current_app = MagicMock()
+        fake_current_app.send_task = MagicMock()
+        fake_celery_module.current_app = fake_current_app
+
+        with patch.dict(sys.modules, {"celery": fake_celery_module}), patch(
+            "app.services.digital_human.check_quota",
+            new=AsyncMock(return_value=ok_quota),
+        ), patch(
+            "app.services.digital_human.track_usage",
+            new=AsyncMock(),
+        ):
+            video = await generate_video(db, shop_id=1, user_id=1, data=data)
+
+        assert video.prefer_quality is True
+        assert video.has_watermark is True
+        db.add.assert_called_once()
+        fake_current_app.send_task.assert_called_once()
+
+    def test_plan_set_contains_expected_tiers(self):
+        assert "pro" in PREFER_QUALITY_PLANS
+        assert "enterprise" in PREFER_QUALITY_PLANS
+        assert "starter" not in PREFER_QUALITY_PLANS
+        assert "trial" not in PREFER_QUALITY_PLANS

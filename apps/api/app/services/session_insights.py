@@ -53,8 +53,12 @@ def _get_redis() -> aioredis.Redis:
     return _redis
 
 
-def _cache_key(session_id: int) -> str:
-    return f"session_insights:{session_id}"
+def _cache_key(shop_id: int, session_id: int) -> str:
+    # Scope by shop_id to prevent cross-tenant cache leaks: the cache read
+    # runs before the ownership check in _gather_context, so a key without
+    # shop_id would let shop B fetch shop A's cached insights by guessing
+    # an integer session id.
+    return f"session_insights:{shop_id}:{session_id}"
 
 
 def _format_duration(seconds: int | None) -> str:
@@ -62,11 +66,12 @@ def _format_duration(seconds: int | None) -> str:
         return "N/A"
     if seconds < 60:
         return f"{seconds}s"
-    minutes = seconds // 60
-    secs = seconds % 60
-    if minutes < 60:
-        return f"{minutes}m {secs}s"
-    return f"{minutes // 60}h {minutes % 60}m"
+    total_minutes = seconds // 60
+    if total_minutes < 60:
+        return f"{total_minutes}m {seconds % 60}s"
+    hours = total_minutes // 60
+    remaining_minutes = total_minutes % 60
+    return f"{hours}h {remaining_minutes}m"
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -505,16 +510,34 @@ async def _resolve_shop_plan(db: AsyncSession, shop_id: int) -> str:
 async def _gather_context(
     db: AsyncSession, shop_id: int, session_id: int
 ) -> dict | None:
+    # Ownership gate runs first — every later fetch is cheap-ish but we
+    # must not reveal that the session exists to a foreign shop. This is
+    # also the ownership check that the Redis cache key intentionally
+    # does NOT cover (see _cache_key docstring), so it is load-bearing.
     detail = await analytics_svc.get_session_detail(db, shop_id, session_id)
     if detail is None:
         return None
 
+    # Reads are sequential, NOT gathered. SQLAlchemy's AsyncSession is not
+    # concurrency-safe — a single session holds one connection and one
+    # transaction, so ``asyncio.gather`` on the same ``db`` raises
+    # "another operation is in progress". Parallelising properly requires
+    # a session factory and seven short-lived sessions, which is a bigger
+    # refactor than this review wants to land. Tracked as follow-up.
+    #
+    # The one optimisation we DO keep is passing the already-fetched
+    # ``detail`` into get_session_comparison so it skips the duplicate
+    # get_session_detail call (kills 3 extra roundtrips per insight
+    # request: main SELECT + _compute_duration_seconds +
+    # _compute_avg_latency_ms).
     top_questions = await analytics_svc.get_session_top_questions(db, shop_id, session_id)
     uncovered = await analytics_svc.get_uncovered_comments(db, shop_id, session_id)
     repeated = await analytics_svc.get_repeated_questions(db, shop_id, session_id)
     products = await analytics_svc.get_mentioned_products_with_gaps(db, shop_id, session_id)
     drops = await analytics_svc.get_engagement_drops(db, shop_id, session_id)
-    comparison = await analytics_svc.get_session_comparison(db, shop_id, session_id)
+    comparison = await analytics_svc.get_session_comparison(
+        db, shop_id, session_id, detail=detail
+    )
     shop_plan = await _resolve_shop_plan(db, shop_id)
 
     adoption_rate = (
@@ -558,7 +581,7 @@ async def generate_session_insights(
 
     Returns ``None`` if the session doesn't exist or doesn't belong to the shop.
     """
-    cache_key = _cache_key(session_id)
+    cache_key = _cache_key(shop_id, session_id)
     redis_client = _get_redis()
 
     if not force:
@@ -630,34 +653,45 @@ async def generate_session_insights(
 
         # Detect hallucinations item-by-item so we can filter precisely on the
         # final attempt instead of dropping the whole payload.
-        hallucinated_ids = {
-            id(it) for it in all_items if _validate_against_hallucination(it)
-        }
-        last_violations = [
-            {"title": it.title[:80], "phrases": _validate_against_hallucination(it)}
-            for it in all_items
-            if id(it) in hallucinated_ids
-        ]
+        #
+        # We previously keyed hallucinated items by ``id(it)``. Python only
+        # guarantees ``id()`` uniqueness for the lifetime of the object — if an
+        # item were GC'd its address could be reused, producing a false-positive
+        # match. Items here are actually held alive for the whole block, but
+        # ``is``-identity via a parallel list is strictly correct and costs
+        # nothing at these sizes (≤9 items).
+        hallucinated_items: list[InsightItem] = []
+        last_violations = []
+        for it in all_items:
+            phrases = _validate_against_hallucination(it)
+            if phrases:
+                hallucinated_items.append(it)
+                last_violations.append(
+                    {"title": it.title[:80], "phrases": phrases}
+                )
+
+        def _not_hallucinated(item: InsightItem) -> bool:
+            return not any(h is item for h in hallucinated_items)
 
         ok_generic = generic_count <= 1
-        ok_hallucination = not hallucinated_ids
+        ok_hallucination = not hallucinated_items
         is_last_attempt = attempt == _MAX_RETRIES
 
         if (ok_generic and ok_hallucination) or is_last_attempt:
             warnings: list[str] = []
 
-            if hallucinated_ids:
+            if hallucinated_items:
                 # Filter out items that recommend non-existent features. Better
                 # to show fewer cards than to lie about the product surface.
-                positives = [it for it in positives if id(it) not in hallucinated_ids]
-                improvements = [it for it in improvements if id(it) not in hallucinated_ids]
-                suggestions = [it for it in suggestions if id(it) not in hallucinated_ids]
+                positives = [it for it in positives if _not_hallucinated(it)]
+                improvements = [it for it in improvements if _not_hallucinated(it)]
+                suggestions = [it for it in suggestions if _not_hallucinated(it)]
                 warnings.append(
-                    f"Đã ẩn {len(hallucinated_ids)} gợi ý nhắc tới tính năng không có thật."
+                    f"Đã ẩn {len(hallucinated_items)} gợi ý nhắc tới tính năng không có thật."
                 )
                 logger.warning(
                     "[insights] session=%s: filtered %d hallucinated items after %d retries: %s",
-                    session_id, len(hallucinated_ids), attempt, last_violations,
+                    session_id, len(hallucinated_items), attempt, last_violations,
                 )
 
             if generic_count > 1:
@@ -679,7 +713,7 @@ async def generate_session_insights(
 
         logger.info(
             "[insights] session=%s attempt %d retrying — generic=%d hallucinated=%d",
-            session_id, attempt + 1, generic_count, len(hallucinated_ids),
+            session_id, attempt + 1, generic_count, len(hallucinated_items),
         )
 
     if insights is None:

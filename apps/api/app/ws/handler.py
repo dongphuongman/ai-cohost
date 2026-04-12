@@ -24,7 +24,7 @@ from app.services.auto_reply import (
     should_auto_reply,
     record_undo,
     disable_auto_reply,
-    _get_redis as get_auto_reply_redis,
+    get_redis as get_auto_reply_redis,
 )
 from app.services.embed_client import enqueue_suggestion_task
 
@@ -35,6 +35,20 @@ _redis = aioredis.from_url(settings.redis_url)
 
 _WS_COMMENT_RATE_LIMIT = 30  # max comments per minute per shop
 _WS_COMMENT_RATE_WINDOW = 60  # seconds
+
+# Valid values for the `action` field on an inbound `suggestion.action` message.
+# Named `_ALLOWED_SUGGESTION_ACTIONS` (not `_ALLOWED_ACTIONS`) to avoid confusion
+# with `app.services.insights.allowed_actions.ALLOWED_ACTIONS`, which is an
+# unrelated registry of dashboard navigation actions consumed by the LLM.
+_ALLOWED_SUGGESTION_ACTIONS: frozenset[str] = frozenset({
+    "sent",
+    "pasted_not_sent",
+    "read",
+    "dismissed",
+    "edited",
+    "auto_sent",
+    "auto_cancelled",
+})
 
 
 async def _check_ws_rate_limit(shop_id: int) -> bool:
@@ -529,8 +543,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 suggestion_id = data.get("suggestion_id")
                 action = data.get("action")
                 edited_text = data.get("edited_text")
-                _ALLOWED_ACTIONS = {"sent", "pasted_not_sent", "read", "dismissed", "edited", "auto_sent", "auto_cancelled"}
-                if suggestion_id and action and action in _ALLOWED_ACTIONS:
+                if suggestion_id and action and action in _ALLOWED_SUGGESTION_ACTIONS:
                     try:
                         async with async_session() as db:
                             await session_svc.update_suggestion_action(
@@ -703,7 +716,6 @@ async def _listen_suggestions(websocket: WebSocket, state: WSConnectionState) ->
                             logger.debug("Auto-reply check failed", exc_info=True)
 
                     if auto_reply_decision and auto_reply_decision.allowed:
-                        from datetime import datetime, timedelta, timezone
                         undo_deadline = datetime.now(timezone.utc) + timedelta(seconds=15)
                         await websocket.send_json({
                             "type": "suggestion.auto_reply",

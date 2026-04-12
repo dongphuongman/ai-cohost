@@ -241,7 +241,7 @@ _MEDIA: dict[str, AllowedAction] = {
 }
 
 
-# Single flat registry — assertion below guarantees no key collisions.
+# Single flat registry — runtime check below guarantees no key collisions.
 ALLOWED_ACTIONS: dict[str, AllowedAction] = {
     **_PRODUCTS,
     **_SCRIPTS,
@@ -252,9 +252,18 @@ ALLOWED_ACTIONS: dict[str, AllowedAction] = {
 }
 
 # Build-time invariant: every key appears exactly once.
-assert len(ALLOWED_ACTIONS) == sum(
-    len(d) for d in (_PRODUCTS, _SCRIPTS, _SESSIONS, _MODERATION, _EXTENSION, _MEDIA)
-), "Duplicate action key across allowed_actions sections"
+# Use an explicit raise (not assert) so `python -O` can't strip the check —
+# a silent duplicate would let one section shadow another in production.
+_seen_action_keys: set[str] = set()
+for _section in (_PRODUCTS, _SCRIPTS, _SESSIONS, _MODERATION, _EXTENSION, _MEDIA):
+    for _key in _section:
+        if _key in _seen_action_keys:
+            raise RuntimeError(
+                f"ALLOWED_ACTIONS has duplicate key: {_key!r}. "
+                f"This is a programming error and must be fixed."
+            )
+        _seen_action_keys.add(_key)
+del _seen_action_keys, _section, _key
 
 
 _SECTION_ORDER: list[tuple[str, dict[str, AllowedAction]]] = [

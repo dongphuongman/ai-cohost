@@ -19,7 +19,12 @@ accumulates thousands of suggestions. The composite index lets Postgres
 range-scan the recent window directly instead of fetching every row in
 the session and filtering by created_at in memory.
 
-Cheap to add — small table, online btree, no rewrite. Safe to roll back.
+Production-safety note
+----------------------
+The index is built with ``CREATE INDEX CONCURRENTLY`` outside alembic's
+transaction (AUTOCOMMIT isolation). The ``suggestions`` table is on the
+WS hot path (every AI reply writes a row) and a blocking build would
+stall WS inserts and trigger the extension's optimistic-UI failure mode.
 """
 from typing import Sequence, Union
 
@@ -33,11 +38,18 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS suggestions_session_created_idx "
-        "ON suggestions (session_id, created_at DESC)"
-    )
+    bind = op.get_bind()
+    with bind.execution_options(isolation_level="AUTOCOMMIT"):
+        bind.exec_driver_sql(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+            "suggestions_session_created_idx "
+            "ON suggestions (session_id, created_at DESC)"
+        )
 
 
 def downgrade() -> None:
-    op.execute("DROP INDEX IF EXISTS suggestions_session_created_idx")
+    bind = op.get_bind()
+    with bind.execution_options(isolation_level="AUTOCOMMIT"):
+        bind.exec_driver_sql(
+            "DROP INDEX CONCURRENTLY IF EXISTS suggestions_session_created_idx"
+        )

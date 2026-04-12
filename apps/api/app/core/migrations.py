@@ -85,6 +85,15 @@ async def get_migration_status(engine: AsyncEngine) -> MigrationStatus:
     return MigrationStatus(head=head, current=current)
 
 
+# Environments allowed to run with a stale schema. Anything else
+# (production, staging, unknown) hard-fails. Staging is intentionally
+# NOT on this list — it mirrors prod schema + prod-like data, and a
+# silent drift there reproduces the exact 2026-04-12 outage shape
+# (UndefinedColumnError hidden behind extension optimistic UI) that
+# this module was written to prevent.
+_SOFT_WARN_ENVS = frozenset({"development", "test"})
+
+
 async def check_migrations_up_to_date(
     engine: AsyncEngine,
     *,
@@ -92,12 +101,14 @@ async def check_migrations_up_to_date(
 ) -> MigrationStatus:
     """Verify the DB is at the script head, and react based on environment.
 
-    - In production: raise ``RuntimeError`` so the process dies before any
-      request hits a half-migrated schema. Better to fail the deploy than
-      to ship a silent data-corruption window.
-    - In any other environment (development/staging): log a loud warning
-      and return. Devs see the message in their uvicorn output and know to
-      run ``alembic upgrade head``.
+    - In production/staging: raise ``RuntimeError`` so the process dies
+      before any request hits a half-migrated schema. Better to fail the
+      deploy than to ship a silent data-corruption window.
+    - In development/test: log a loud warning and return. Devs see the
+      message in their uvicorn output and know to run ``alembic upgrade head``.
+
+    Any unknown environment is treated as fail-fast by default — an unset
+    or typo'd ``APP_ENV`` should not silently degrade to "warn only".
 
     Returns the ``MigrationStatus`` so callers (or tests) can inspect it.
     """
@@ -116,12 +127,11 @@ async def check_migrations_up_to_date(
         f"Run `alembic upgrade head` from apps/api/."
     )
 
-    if app_env == "production":
-        # Hard fail — never serve traffic against a stale schema in prod.
-        logger.critical(msg)
-        raise RuntimeError(msg)
+    # Explicit dev/test soft-warn list. Anything else (production, staging,
+    # unknown) hard-fails.
+    if app_env in _SOFT_WARN_ENVS:
+        logger.warning(msg)
+        return status
 
-    # Dev / staging: shout but keep running so devs can still hit endpoints
-    # that don't touch the affected tables.
-    logger.warning(msg)
-    return status
+    logger.critical(msg)
+    raise RuntimeError(msg)

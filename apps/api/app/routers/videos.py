@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/videos", tags=["videos"])
 
 
-@router.get("/", response_model=list[VideoResponse])
+@router.get("", response_model=list[VideoResponse])
 async def list_videos_endpoint(
     shop: ShopContext = Depends(get_current_shop),
     db: AsyncSession = Depends(get_db),
