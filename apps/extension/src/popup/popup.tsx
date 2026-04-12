@@ -317,7 +317,7 @@ export function Popup() {
                       <div>
                         <div class="text-xs font-medium text-gray-700">Auto-reply</div>
                         <div class="text-[10px] text-gray-400">
-                          Tu dong tra loi chao hoi va FAQ
+                          Tự động trả lời chào hỏi và FAQ
                         </div>
                       </div>
                       <button
@@ -332,7 +332,7 @@ export function Popup() {
                     </div>
                     {autoReplyEnabled && (
                       <div class="text-[10px] text-yellow-600 mt-1.5">
-                        ⚠ Chi auto-reply cho: chao hoi, cam on, FAQ khop &gt;90%
+                        ⚠ Chỉ auto-reply cho: chào hỏi, cảm ơn, FAQ khớp &gt;90%
                       </div>
                     )}
                   </div>

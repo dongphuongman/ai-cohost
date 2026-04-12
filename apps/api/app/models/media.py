@@ -23,6 +23,10 @@ class DhVideo(Base):
 
     provider: Mapped[str] = mapped_column(Text, nullable=False)
     provider_job_id: Mapped[str | None] = mapped_column(Text)
+    # Premium quality preference — when True, router picks HeyGen even if
+    # LiteAvatar is available. Wired through the schema/migration in Đợt 1
+    # so the UI toggle in Đợt 2 needs no additional migration.
+    prefer_quality: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
 
     video_url: Mapped[str | None] = mapped_column(Text)
     video_duration_seconds: Mapped[int | None] = mapped_column(Integer)

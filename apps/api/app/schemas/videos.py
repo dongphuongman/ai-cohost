@@ -21,6 +21,9 @@ class VideoGenerateRequest(BaseModel):
     avatar_preset: str = Field(default="default_avatar", max_length=200)
     voice_clone_id: int | None = None
     background: str = Field(default="#FFFFFF", max_length=200)
+    # Premium quality flag — Đợt 1 always sends False (no UI toggle yet);
+    # Đợt 2 will expose a checkbox for Agency-plan users.
+    prefer_quality: bool = False
 
     @field_validator("text")
     @classmethod
@@ -43,6 +46,7 @@ class VideoResponse(BaseModel):
     background: str | None
     provider: str
     provider_job_id: str | None
+    prefer_quality: bool
     video_url: str | None
     video_duration_seconds: int | None
     file_size_bytes: int | None

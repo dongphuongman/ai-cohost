@@ -54,6 +54,9 @@ async def generate_video(
             raise ValueError("Giọng nói chưa sẵn sàng sử dụng")
 
     # 3. Create DB record — has_watermark is ALWAYS True
+    # provider defaults to 'liteavatar' (cheap self-hosted) at the DB level;
+    # the worker's DHProviderRouter overwrites it with the actual provider
+    # selected at execution time (heygen fallback when liteavatar is down).
     video = DhVideo(
         shop_id=shop_id,
         created_by=user_id,
@@ -62,7 +65,8 @@ async def generate_video(
         avatar_preset=data.avatar_preset,
         voice_clone_id=data.voice_clone_id,
         background=data.background or "#FFFFFF",
-        provider="heygen",
+        provider="liteavatar",
+        prefer_quality=data.prefer_quality,
         status="queued",
         has_watermark=True,
     )

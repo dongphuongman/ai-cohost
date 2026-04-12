@@ -7,6 +7,24 @@ from app.models.billing import UsageLog
 from app.models.tenant import Shop
 from app.schemas.billing import PLAN_LIMITS
 
+# Subscription states that entitle the shop to its paid plan's quota.
+# Anything else (past_due, cancelled, unpaid, expired, paused, None) collapses
+# the shop back to the trial plan until billing is resolved.
+HEALTHY_PLAN_STATUSES = frozenset({"active", "trialing", "on_trial"})
+
+
+def _effective_plan(plan: str | None, plan_status: str | None) -> str:
+    """Return the plan whose limits should be enforced for a given (plan, plan_status).
+
+    A paid plan only entitles the shop to paid quota while the subscription is
+    in a healthy state. On past_due, cancelled, unpaid, expired, paused, or any
+    unknown status, the shop falls back to trial limits — preventing silent
+    revenue leak when a card declines but the shop keeps the plan name.
+    """
+    if plan_status not in HEALTHY_PLAN_STATUSES:
+        return "trial"
+    return plan if plan in PLAN_LIMITS else "trial"
+
 
 class QuotaStatus:
     def __init__(self, used: float, limit: int, remaining: float):
@@ -47,9 +65,11 @@ async def track_usage(
 async def check_quota(
     db: AsyncSession, shop_id: int, resource_type: str
 ) -> QuotaStatus:
-    shop_result = await db.execute(select(Shop.plan).where(Shop.id == shop_id))
-    plan = shop_result.scalar_one()
-    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["trial"])
+    shop_result = await db.execute(
+        select(Shop.plan, Shop.plan_status).where(Shop.id == shop_id)
+    )
+    plan, plan_status = shop_result.one()
+    limits = PLAN_LIMITS[_effective_plan(plan, plan_status)]
 
     resource_limit_map = {
         "live_hours": "live_hours",
@@ -77,9 +97,11 @@ async def check_quota(
 
 
 async def check_seat_limit(db: AsyncSession, shop_id: int) -> QuotaStatus:
-    shop_result = await db.execute(select(Shop.plan).where(Shop.id == shop_id))
-    plan = shop_result.scalar_one()
-    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["trial"])
+    shop_result = await db.execute(
+        select(Shop.plan, Shop.plan_status).where(Shop.id == shop_id)
+    )
+    plan, plan_status = shop_result.one()
+    limits = PLAN_LIMITS[_effective_plan(plan, plan_status)]
     seat_limit = limits.get("team_seats", 1)
 
     from app.models.tenant import ShopMember

@@ -88,7 +88,7 @@ class TestVideoResponse:
             "background", "provider", "provider_job_id", "video_url",
             "video_duration_seconds", "file_size_bytes", "has_watermark",
             "status", "error_message", "credits_used", "created_at",
-            "completed_at", "expires_at",
+            "completed_at", "expires_at", "prefer_quality",
         }
         assert expected.issubset(fields)
 

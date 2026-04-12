@@ -35,6 +35,10 @@ class Settings(BaseSettings):
 
     elevenlabs_api_key: str = ""
     heygen_api_key: str = ""
+    # F7 digital human providers
+    # When empty, LiteAvatarProvider.is_available() returns False and the
+    # router falls back to HeyGen — production behavior is unchanged.
+    lite_avatar_url: str = ""
 
     sentry_dsn: str = ""
 
