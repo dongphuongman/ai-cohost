@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 
 import redis.asyncio as aioredis
 import sentry_sdk
@@ -62,6 +63,128 @@ def _looks_like_host_reply(text: str) -> bool:
         return False
     head = text.strip().lower()[:40]
     return any(head.startswith(p) for p in _HOST_REPLY_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
+# Host-loop self-reply detection
+# ---------------------------------------------------------------------------
+#
+# When the AI generates a suggestion and the host actually sends it to
+# Facebook chat, the live chat panel shows the message back as a normal
+# comment. The Chrome extension then re-scrapes that message and pushes it
+# to the backend as a fresh `comment.new`. Without intervention the bot's
+# own reply gets:
+#   * counted as a viewer comment in the analytics rollups,
+#   * fed back into the suggestion pipeline (cost & latency waste),
+#   * surfaced inside "Top questions" on the dashboard (visible to users).
+#
+# This is exactly what we caught in session 17 during the 2026-04-12 UAT.
+# The narrow ``_HOST_REPLY_PREFIXES`` allowlist can't cover every persona
+# voice, so we add a content-equality fallback against the shop's own
+# recently-sent suggestions.
+
+# How long after a suggestion is sent we still consider an incoming
+# comment to be a possible self-reply re-scrape. 5 minutes is comfortably
+# above the FB-chat lag + extension polling cycle (~5–10s) without bloating
+# the per-query result set under the 30 cmts/min rate limit.
+_SELF_REPLY_WINDOW_MINUTES = 5
+
+# Prefix length for "fuzzy" match. Handles cases where FB truncates long
+# messages, the host edits a trailing word, or the scraper trims emojis.
+# 30 chars is enough to be uniquely identifying for any non-trivial reply.
+_SELF_REPLY_PREFIX_LEN = 30
+
+# Skip very short comments to avoid false positives on common viewer
+# replies like "?", "ok", "có ạ" — these are too short to fingerprint and
+# would also be too short to ever be a meaningful AI suggestion.
+_SELF_REPLY_MIN_LEN = 3
+
+
+def _normalize_for_dedup(text: str | None) -> str:
+    """Lower + strip for case/whitespace-insensitive comparison."""
+    return (text or "").strip().lower()
+
+
+def _is_self_reply_match(comment_text: str, suggestion_texts: list[str]) -> bool:
+    """Pure-logic half of host-loop detection.
+
+    Given an incoming comment and a list of suggestion texts that this
+    shop sent inside the recent window, return True if the comment looks
+    like a re-scrape of one of those suggestions.
+
+    Match policy (in order):
+      1. exact equality on normalized text
+      2. 30-char prefix in either direction (handles FB UI truncation,
+         host appending a word, or trailing emoji loss during scrape)
+
+    Pure function — no DB, no network. Direct unit-test target.
+    """
+    norm_comment = _normalize_for_dedup(comment_text)
+    if len(norm_comment) < _SELF_REPLY_MIN_LEN:
+        return False
+
+    for sug in suggestion_texts:
+        norm_sug = _normalize_for_dedup(sug)
+        if len(norm_sug) < _SELF_REPLY_MIN_LEN:
+            continue
+
+        if norm_comment == norm_sug:
+            return True
+
+        if (
+            len(norm_comment) >= _SELF_REPLY_PREFIX_LEN
+            and norm_sug.startswith(norm_comment[:_SELF_REPLY_PREFIX_LEN])
+        ):
+            return True
+
+        if (
+            len(norm_sug) >= _SELF_REPLY_PREFIX_LEN
+            and norm_comment.startswith(norm_sug[:_SELF_REPLY_PREFIX_LEN])
+        ):
+            return True
+
+    return False
+
+
+async def _fetch_recent_sent_suggestion_texts(
+    db, session_id: int, *, window_minutes: int = _SELF_REPLY_WINDOW_MINUTES
+) -> list[str]:
+    """Return texts of suggestions in this session that the host actually sent.
+
+    Only ``status='sent'`` qualifies — ``pasted_not_sent`` means the host
+    copied a suggestion via Quick Paste but never clicked Send on Facebook,
+    so it never appears in the chat panel and could not be re-scraped.
+
+    Bounded by both the time window and a hard row limit so a runaway
+    session can't blow up the per-comment query latency.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    result = await db.execute(
+        select(Suggestion.text_)
+        .where(
+            Suggestion.session_id == session_id,
+            Suggestion.status == "sent",
+            Suggestion.created_at >= cutoff,
+        )
+        .order_by(Suggestion.created_at.desc())
+        .limit(50)
+    )
+    return [row[0] for row in result.all() if row[0]]
+
+
+async def is_likely_self_reply(db, session_id: int, comment_text: str) -> bool:
+    """Detect host-loop self-reply: AI suggestion → host sent → re-scrape.
+
+    Thin DB wrapper around ``_is_self_reply_match`` so the matching logic
+    stays pure and unit-testable. Cheap fast-path for empty/short text
+    avoids touching the DB at all in the common viewer-comment case.
+    """
+    if not comment_text or len(comment_text.strip()) < _SELF_REPLY_MIN_LEN:
+        return False
+    recent = await _fetch_recent_sent_suggestion_texts(db, session_id)
+    if not recent:
+        return False
+    return _is_self_reply_match(comment_text, recent)
 
 
 def _cache_key(shop_id: int, comment_text: str) -> str:
@@ -244,6 +367,24 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     or comment_data.get("is_from_host")
                     or _looks_like_host_reply(comment_text)
                 )
+
+                # Host-loop self-reply detection. Only run when the cheaper
+                # checks above haven't already classified the comment as host
+                # (saves a DB roundtrip on the common viewer-comment path).
+                # See _is_self_reply_match for the matching contract.
+                if not is_from_host:
+                    async with async_session() as db:
+                        if await is_likely_self_reply(
+                            db, state.session_id, comment_text
+                        ):
+                            is_from_host = True
+                            logger.info(
+                                "WS host-loop detected: session=%s shop=%s "
+                                "text=%r",
+                                state.session_uuid,
+                                state.shop_id,
+                                comment_text[:80],
+                            )
 
                 if is_from_host:
                     # Host/bot comment — persist for the timeline but skip

@@ -36,7 +36,14 @@ from pathlib import Path
 import pytest
 
 from app.models.session import Comment
-from app.ws.handler import _HOST_REPLY_PREFIXES, _looks_like_host_reply
+from app.ws.handler import (
+    _HOST_REPLY_PREFIXES,
+    _SELF_REPLY_MIN_LEN,
+    _SELF_REPLY_PREFIX_LEN,
+    _is_self_reply_match,
+    _looks_like_host_reply,
+    is_likely_self_reply,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -197,3 +204,210 @@ def test_comment_model_columns_have_corresponding_migration():
         f"migration that creates them, or remove the ORM mapping. "
         f"(This test guards against the 2026-04-12 is_from_host incident.)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 3. Host-loop self-reply detection
+# ---------------------------------------------------------------------------
+#
+# When the host actually clicks Send on a Quick-Paste suggestion, the live
+# chat panel shows the AI's text back as a fresh comment. The Chrome
+# extension scrapes it on the next polling tick and pushes it to the WS as
+# `comment.new`, which (without intervention) triggers a new suggestion
+# task and pollutes Top Questions on the dashboard. We caught this exact
+# leak in session 17 during the 2026-04-12 UAT.
+#
+# These tests pin both halves of the fix:
+#
+#   * `_is_self_reply_match` — pure logic that decides whether a comment
+#     text matches a list of recently-sent suggestion texts. No DB.
+#
+#   * `is_likely_self_reply` — thin DB wrapper. Tested with a fake async
+#     session so we can verify the fast-path short-circuit, the cutoff
+#     query, and the empty-recent-list case without standing up Postgres.
+
+
+# Realistic suggestion text that the AI persona generates today. Pinned
+# verbatim from session 17 of the 2026-04-12 UAT — when this fails because
+# the persona changes, the test should be UPDATED, not the matcher loosened.
+_SAMPLE_SUGGESTIONS = [
+    "Dạ đúng rồi chị yêu ơi! 🥰 Giá KEM MẶT VICTORY NGỌC TRAI TRẮNG DA hôm nay vẫn là 60,000 VND đó ạ! Mình yên tâm mua sắm nha! ❤️",
+    "Chào chị yêu ơi! 🥰 Hôm nay bên em có deal KEM MẶT VICTORY NGỌC TRAI TRẮNG DA chỉ 60K thôi nha! ❤️",
+    "Dạ em xin lỗi vì em không thể hỗ trợ mình về vấn đề này ạ. Để em check lại nha!",
+]
+
+
+class TestSelfReplyMatchPure:
+    """Pure-logic tests for _is_self_reply_match. No DB, no I/O."""
+
+    def test_exact_match_is_detected(self):
+        """The exact same text the AI sent must match."""
+        text = _SAMPLE_SUGGESTIONS[0]
+        assert _is_self_reply_match(text, _SAMPLE_SUGGESTIONS) is True
+
+    def test_case_insensitive_match(self):
+        """The scraper might lowercase or uppercase. Match anyway."""
+        text = _SAMPLE_SUGGESTIONS[0].upper()
+        assert _is_self_reply_match(text, _SAMPLE_SUGGESTIONS) is True
+
+    def test_whitespace_normalized(self):
+        """Leading/trailing whitespace from the scraper must not break match."""
+        text = "   " + _SAMPLE_SUGGESTIONS[0] + "   "
+        assert _is_self_reply_match(text, _SAMPLE_SUGGESTIONS) is True
+
+    def test_truncated_comment_matches_full_suggestion(self):
+        """FB truncates long messages mid-sentence; match the prefix."""
+        # First 50 chars of a 100-char suggestion
+        truncated = _SAMPLE_SUGGESTIONS[0][:50]
+        assert _is_self_reply_match(truncated, _SAMPLE_SUGGESTIONS) is True
+
+    def test_extended_comment_matches_short_suggestion(self):
+        """Scraper appends a timestamp/author suffix; match the prefix the
+        other direction."""
+        sug = "Dạ shop báo giá 350,000 VND ạ, freeship nha!"
+        comment = sug + " 12:34 PM"
+        assert _is_self_reply_match(comment, [sug]) is True
+
+    def test_unrelated_viewer_comment_does_not_match(self):
+        """A real viewer question must NOT match any suggestion."""
+        text = "Shop ơi giá bao nhiêu vậy ạ?"
+        assert _is_self_reply_match(text, _SAMPLE_SUGGESTIONS) is False
+
+    def test_short_comment_skipped(self):
+        """Comments under min length never match — avoids false positives
+        on '?', 'ok', 'có ạ'."""
+        # Even with a suggestion that starts with 'ok', a 2-char 'ok'
+        # comment must not be classified as a self-reply.
+        assert _is_self_reply_match("ok", ["ok shop, để em check"]) is False
+        assert _is_self_reply_match("?", _SAMPLE_SUGGESTIONS) is False
+        assert _is_self_reply_match("", _SAMPLE_SUGGESTIONS) is False
+        assert _is_self_reply_match("   ", _SAMPLE_SUGGESTIONS) is False
+
+    def test_empty_suggestion_list(self):
+        """No recent suggestions → never a self-reply."""
+        assert _is_self_reply_match("Dạ shop ơi", []) is False
+
+    def test_short_suggestion_in_list_is_skipped(self):
+        """A degenerate 1-char suggestion must not poison the matcher."""
+        assert _is_self_reply_match("ok shop", ["a", "b"]) is False
+
+    def test_partial_overlap_below_prefix_threshold_does_not_match(self):
+        """Two messages sharing only the first 10 chars must NOT match —
+        the 30-char prefix gate guards against generic openings like
+        'Dạ shop ơi'."""
+        sug = "Dạ shop ơi giá KEM CHỐNG NẮNG là 350K ạ"
+        # Both start with 'dạ shop ơi giá ' (15 chars) but the suggestion is
+        # about a different product than the comment.
+        comment = "Dạ shop ơi giá SỮA RỬA MẶT là bao nhiêu vậy ạ?"
+        assert _is_self_reply_match(comment, [sug]) is False
+
+    def test_constants_are_sane(self):
+        """Internal invariants the matcher relies on."""
+        assert _SELF_REPLY_MIN_LEN >= 1
+        assert _SELF_REPLY_PREFIX_LEN >= _SELF_REPLY_MIN_LEN
+        assert _SELF_REPLY_PREFIX_LEN <= 100  # not absurdly long
+
+
+# ---- DB wrapper tests ------------------------------------------------------
+#
+# We don't stand up Postgres for these. Instead we patch the fetch helper so
+# is_likely_self_reply runs against a controlled list of "recent suggestion
+# texts". This catches the wiring around the pure matcher: the short-text
+# fast-path, the empty-recent-list short-circuit, and the propagation of
+# matches from the matcher into the boolean return.
+
+import app.ws.handler as handler_mod  # noqa: E402  (intentional late import)
+
+
+class _FakeDB:
+    """Sentinel object handed to is_likely_self_reply.
+
+    The real function only forwards it to the patched fetch helper, so
+    nothing here is exercised — but having a distinct object lets the test
+    assert that the right session was passed through unchanged.
+    """
+
+
+@pytest.fixture
+def patched_fetch(monkeypatch):
+    """Replace _fetch_recent_sent_suggestion_texts with a controllable fake.
+
+    Yields a setter the test can use to install per-call return values.
+    """
+    state = {"texts": [], "calls": []}
+
+    async def fake_fetch(db, session_id, *, window_minutes=5):
+        state["calls"].append((db, session_id, window_minutes))
+        return state["texts"]
+
+    monkeypatch.setattr(
+        handler_mod, "_fetch_recent_sent_suggestion_texts", fake_fetch
+    )
+    return state
+
+
+@pytest.mark.asyncio
+async def test_is_likely_self_reply_returns_true_on_match(patched_fetch):
+    patched_fetch["texts"] = list(_SAMPLE_SUGGESTIONS)
+    db = _FakeDB()
+    result = await is_likely_self_reply(db, 17, _SAMPLE_SUGGESTIONS[0])
+    assert result is True
+    # Sanity: the wrapper actually called the fetch with our session_id
+    assert patched_fetch["calls"] == [(db, 17, 5)]
+
+
+@pytest.mark.asyncio
+async def test_is_likely_self_reply_returns_false_when_no_match(patched_fetch):
+    patched_fetch["texts"] = list(_SAMPLE_SUGGESTIONS)
+    result = await is_likely_self_reply(
+        _FakeDB(), 17, "Shop ơi giá bao nhiêu vậy ạ?"
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_is_likely_self_reply_skips_db_for_short_text(patched_fetch):
+    """Short text must not even hit the DB. Verified by checking call count."""
+    result = await is_likely_self_reply(_FakeDB(), 17, "ok")
+    assert result is False
+    assert patched_fetch["calls"] == [], (
+        "Short text should short-circuit BEFORE the DB query — saves a "
+        "roundtrip on common one-word viewer replies."
+    )
+
+
+@pytest.mark.asyncio
+async def test_is_likely_self_reply_skips_db_for_empty_text(patched_fetch):
+    assert await is_likely_self_reply(_FakeDB(), 17, "") is False
+    assert await is_likely_self_reply(_FakeDB(), 17, "   ") is False
+    assert await is_likely_self_reply(_FakeDB(), 17, None) is False
+    assert patched_fetch["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_is_likely_self_reply_returns_false_when_no_recent_suggestions(
+    patched_fetch,
+):
+    """Brand new session with zero sent suggestions yet — never a self-reply."""
+    patched_fetch["texts"] = []  # session has no sent suggestions
+    result = await is_likely_self_reply(
+        _FakeDB(), 17, "Dạ shop báo giá 350K ạ, freeship cho mình nha!"
+    )
+    assert result is False
+    # Did consult the DB though — that's the difference vs the short-text path
+    assert len(patched_fetch["calls"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_is_likely_self_reply_truncated_facebook_render(patched_fetch):
+    """End-to-end shape of the actual UAT bug: AI sends a long reply, FB
+    renders it truncated, the scraper sends the truncated form back as a
+    new comment. Must be tagged as host."""
+    full = (
+        "Dạ đúng rồi chị yêu ơi! 🥰 Giá KEM MẶT VICTORY NGỌC TRAI TRẮNG DA "
+        "hôm nay vẫn là 60,000 VND đó ạ!"
+    )
+    truncated = full[:60]  # FB truncated mid-sentence
+    patched_fetch["texts"] = [full]
+    result = await is_likely_self_reply(_FakeDB(), 17, truncated)
+    assert result is True
