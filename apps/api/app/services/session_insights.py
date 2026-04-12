@@ -390,9 +390,10 @@ FORBIDDEN_PHRASES: tuple[str, ...] = (
     "kết nối messenger",
     "tích hợp messenger",
     "tích hợp crm",
-    # Notification settings — none exist.
-    "notification setting",
+    # Notification settings — none exist (no email/Slack/push UI at all).
+    "notification",
     "thông báo qua email",
+    "thông báo email",
     "thông báo slack",
     # Generic catch-all — there is no "AI settings" page.
     "cài đặt ai",
