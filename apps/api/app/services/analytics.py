@@ -16,6 +16,7 @@ from app.schemas.analytics import (
     OverviewStats,
     ProductMention,
     RecentSession,
+    SessionComparison,
     SessionDetailResponse,
     SessionListItem,
     SessionListResponse,
@@ -459,6 +460,74 @@ async def export_session_csv(db: AsyncSession, shop_id: int, session_id: int) ->
         ])
 
     return output.getvalue()
+
+
+# --- Comparison vs 30-day average ---
+
+
+_COMPARISON_MIN_SAMPLES = 5
+
+
+async def get_session_comparison(
+    db: AsyncSession, shop_id: int, session_id: int
+) -> SessionComparison:
+    """Compare a session against the shop's last-30-day average.
+
+    Returns a per-metric percentage diff. If the shop has fewer than
+    ``_COMPARISON_MIN_SAMPLES`` prior ended sessions in the window, all diffs
+    are returned as ``None`` so the UI can hide noisy indicators.
+    """
+    detail = await get_session_detail(db, shop_id, session_id)
+    if detail is None:
+        return SessionComparison()
+
+    result = await db.execute(
+        text("""
+            SELECT
+                COUNT(*) AS sample,
+                AVG(COALESCE(
+                    duration_seconds,
+                    EXTRACT(EPOCH FROM (ended_at - started_at))::INT
+                )) AS avg_duration,
+                AVG(comments_count) AS avg_comments,
+                AVG(suggestions_count) AS avg_suggestions,
+                AVG(CASE
+                    WHEN suggestions_count > 0
+                    THEN sent_count::FLOAT / suggestions_count * 100
+                    ELSE NULL
+                END) AS avg_adoption
+            FROM live_sessions
+            WHERE shop_id = :shop_id
+              AND id != :session_id
+              AND ended_at IS NOT NULL
+              AND ended_at > NOW() - INTERVAL '30 days'
+        """),
+        {"shop_id": shop_id, "session_id": session_id},
+    )
+    row = result.first()
+    sample = int(row.sample or 0) if row else 0
+
+    if sample < _COMPARISON_MIN_SAMPLES:
+        return SessionComparison(sample_size=sample)
+
+    def diff(current: float | int | None, baseline: float | None) -> float | None:
+        if current is None or baseline is None or baseline == 0:
+            return None
+        return round((float(current) - float(baseline)) / float(baseline) * 100, 1)
+
+    current_adoption = (
+        (detail.sent_count / detail.suggestions_count * 100)
+        if detail.suggestions_count > 0
+        else None
+    )
+
+    return SessionComparison(
+        duration=diff(detail.duration_seconds, row.avg_duration),
+        comments=diff(detail.comments_count, row.avg_comments),
+        suggestions=diff(detail.suggestions_count, row.avg_suggestions),
+        adoption=diff(current_adoption, row.avg_adoption),
+        sample_size=sample,
+    )
 
 
 # --- Monthly usage summary ---
