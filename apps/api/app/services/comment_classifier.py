@@ -197,7 +197,25 @@ def classify_rule_based(text: str, shop_rules: ShopRules | None = None) -> Class
     # pricing question with high buying intent).
     is_question = _is_question(text_stripped)
 
-    # --- Greeting ---
+    # --- Specific buying-intent signals run BEFORE greeting/praise ---
+    # Order matters: a comment like "Shop ơi giá ạ" has both a greeting
+    # prefix AND a pricing keyword. We must check pricing first so the
+    # specific signal wins over the generic greeting prefix. Sales-relevant
+    # intents always have priority over conversational chitchat.
+
+    # --- Pricing questions ---
+    if _PRICING.search(text_stripped):
+        return ClassifyResult(intent="pricing", confidence=0.85, action="generate_ai")
+
+    # --- Shipping questions ---
+    if _SHIPPING.search(text_stripped):
+        return ClassifyResult(intent="shipping", confidence=0.85, action="generate_ai")
+
+    # --- Complaints ---
+    if _COMPLAINT.search(text_stripped):
+        return ClassifyResult(intent="complaint", confidence=0.8, action="generate_ai")
+
+    # --- Greeting (only after specific intents have had a chance) ---
     if (_GREETING.search(text_stripped) or _JOINING.search(text_stripped)) and len(text_stripped) < 40:
         if is_question:
             return ClassifyResult(
@@ -216,18 +234,6 @@ def classify_rule_based(text: str, shop_rules: ShopRules | None = None) -> Class
                     reason="Praise tokens but contains question — route to AI",
                 )
             return ClassifyResult(intent="praise", confidence=0.7, action="skip_ai")
-
-    # --- Pricing questions ---
-    if _PRICING.search(text_stripped):
-        return ClassifyResult(intent="pricing", confidence=0.85, action="generate_ai")
-
-    # --- Shipping questions ---
-    if _SHIPPING.search(text_stripped):
-        return ClassifyResult(intent="shipping", confidence=0.85, action="generate_ai")
-
-    # --- Complaints ---
-    if _COMPLAINT.search(text_stripped):
-        return ClassifyResult(intent="complaint", confidence=0.8, action="generate_ai")
 
     # --- General questions ---
     if _QUESTION.search(text_stripped):
