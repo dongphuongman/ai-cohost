@@ -69,8 +69,15 @@ _JOINING = re.compile(
     r"^(mình|em|tôi|anh|chị)\s+(mới|vừa)\s+(vào|đến|join)", re.IGNORECASE
 )
 
+# NOTE: "hay" was removed from this regex — it is a homograph in
+# Vietnamese ("hay" = "or" as a conjunction, e.g.
+# "Dùng trước hay sau kem chống nắng?" = "Use before OR after sunscreen?").
+# It used to mis-tag product-usage questions as praise → skip_ai.
+# "hay quá" / "hay thật" still match via the explicit phrases below.
 _PRAISE = re.compile(
-    r"(xinh|đẹp|tuyệt|hay|thích|yêu|love|cảm ơn|cam on|thanks|tks|thank you|quá đỉnh|tuyệt vời|hay quá|đẹp quá|xinh quá)",
+    r"(xinh|đẹp|tuyệt|thích|yêu|love|cảm ơn|cam on|thanks|tks|thank you|"
+    r"quá đỉnh|tuyệt vời|hay quá|hay thật|hay ghê|đẹp quá|xinh quá|"
+    r"ngon|chuẩn|đỉnh|xuất sắc|tốt quá)",
     re.IGNORECASE,
 )
 _PRAISE_EMOJI = re.compile(r"[❤💕👍🔥💯🥰😍👏🙏💖]+")
