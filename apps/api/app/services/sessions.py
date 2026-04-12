@@ -77,6 +77,7 @@ async def ingest_comment(
     intent: str | None = None,
     confidence: float | None = None,
     is_spam: bool = False,
+    is_from_host: bool = False,
 ) -> Comment:
     comment = Comment(
         session_id=session_id,
@@ -87,6 +88,7 @@ async def ingest_comment(
         intent=intent,
         confidence=confidence,
         is_spam=is_spam,
+        is_from_host=is_from_host,
     )
     db.add(comment)
     await db.flush()

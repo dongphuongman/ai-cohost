@@ -181,6 +181,55 @@ async def list_sessions(
 # --- Session detail ---
 
 
+async def _compute_duration_seconds(
+    db: AsyncSession, session: LiveSession
+) -> int | None:
+    """Calculate session duration in seconds with fallback chain.
+
+    Priority:
+        1. Stored ``duration_seconds`` (set by ``end_session``).
+        2. ``ended_at - started_at`` (if both exist but stored value is null).
+        3. ``last_comment.received_at - started_at`` (session not ended cleanly).
+        4. ``None`` if there is no usable signal.
+    """
+    if session.duration_seconds:
+        return session.duration_seconds
+
+    if session.started_at and session.ended_at:
+        return int((session.ended_at - session.started_at).total_seconds())
+
+    if session.started_at:
+        last = await db.execute(
+            select(func.max(Comment.received_at)).where(
+                Comment.session_id == session.id
+            )
+        )
+        last_at = last.scalar_one_or_none()
+        if last_at:
+            seconds = int((last_at - session.started_at).total_seconds())
+            return seconds if seconds > 0 else None
+
+    return None
+
+
+async def _compute_avg_latency_ms(
+    db: AsyncSession, session_id: int
+) -> int | None:
+    """Aggregate average suggestion latency for a session.
+
+    Stored ``LiveSession.avg_latency_ms`` is not currently maintained by the
+    worker, so we compute on-the-fly from ``suggestions.latency_ms``.
+    """
+    result = await db.execute(
+        select(func.avg(Suggestion.latency_ms)).where(
+            Suggestion.session_id == session_id,
+            Suggestion.latency_ms.isnot(None),
+        )
+    )
+    avg = result.scalar_one_or_none()
+    return int(avg) if avg is not None else None
+
+
 async def get_session_detail(
     db: AsyncSession, shop_id: int, session_id: int
 ) -> SessionDetailResponse | None:
@@ -193,7 +242,14 @@ async def get_session_detail(
     session = result.scalar_one_or_none()
     if not session:
         return None
-    return SessionDetailResponse.model_validate(session)
+
+    detail = SessionDetailResponse.model_validate(session)
+    # Override with freshly computed values — stored columns can drift if the
+    # session was interrupted or the worker never wrote latency back.
+    detail.duration_seconds = await _compute_duration_seconds(db, session)
+    if detail.avg_latency_ms is None:
+        detail.avg_latency_ms = await _compute_avg_latency_ms(db, session_id)
+    return detail
 
 
 # --- Chart: comments per minute ---
@@ -202,17 +258,21 @@ async def get_session_detail(
 async def get_session_chart(
     db: AsyncSession, shop_id: int, session_id: int
 ) -> list[ChartPoint]:
+    # Use raw SQL: SQLAlchemy binds `'minute'` as a separate parameter each
+    # time it's emitted, so func.date_trunc(...) in SELECT vs. GROUP BY
+    # becomes `date_trunc($1, ...)` vs `date_trunc($4, ...)` — PostgreSQL
+    # treats those as distinct expressions and raises a GROUP BY error.
     result = await db.execute(
-        select(
-            func.date_trunc("minute", Comment.received_at).label("minute"),
-            func.count(Comment.id).label("comment_count"),
-        )
-        .where(
-            Comment.session_id == session_id,
-            Comment.shop_id == shop_id,
-        )
-        .group_by(func.date_trunc("minute", Comment.received_at))
-        .order_by(func.date_trunc("minute", Comment.received_at))
+        text("""
+            SELECT date_trunc('minute', received_at) AS minute,
+                   COUNT(id) AS comment_count
+            FROM comments
+            WHERE session_id = :session_id
+              AND shop_id = :shop_id
+            GROUP BY 1
+            ORDER BY 1
+        """),
+        {"session_id": session_id, "shop_id": shop_id},
     )
     return [
         ChartPoint(minute=row.minute, comment_count=row.comment_count)
@@ -255,18 +315,35 @@ async def get_session_products(
 async def get_session_top_questions(
     db: AsyncSession, shop_id: int, session_id: int
 ) -> list[TopQuestion]:
+    """Top frequently-asked questions FROM VIEWERS ONLY.
+
+    Filters out:
+        - host/bot comments (``is_from_host = true``)
+        - spam (``is_spam = true``)
+        - very short noise (length <= 5)
+    Groups by exact text + intent and orders by frequency.
+    """
     result = await db.execute(
-        select(Comment.text_, Comment.intent)
-        .where(
-            Comment.session_id == session_id,
-            Comment.shop_id == shop_id,
-            Comment.intent.in_(["question", "pricing", "shipping", "complaint"]),
-        )
-        .order_by(Comment.received_at.desc())
-        .limit(10)
+        text("""
+            SELECT
+                c.text  AS text,
+                c.intent AS intent,
+                COUNT(*) AS occurrences
+            FROM comments c
+            WHERE c.session_id = :session_id
+              AND c.shop_id = :shop_id
+              AND c.is_from_host = false
+              AND c.is_spam = false
+              AND c.intent IN ('question', 'pricing', 'shipping', 'complaint')
+              AND length(c.text) > 5
+            GROUP BY c.text, c.intent
+            ORDER BY occurrences DESC, c.text
+            LIMIT 10
+        """),
+        {"session_id": session_id, "shop_id": shop_id},
     )
     return [
-        TopQuestion(text=row.text_, intent=row.intent)
+        TopQuestion(text=row.text, intent=row.intent)
         for row in result.all()
     ]
 

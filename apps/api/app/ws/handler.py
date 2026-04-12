@@ -44,6 +44,25 @@ async def _check_ws_rate_limit(shop_id: int) -> bool:
     return count <= _WS_COMMENT_RATE_LIMIT
 
 
+# Heuristic prefixes for AI/host bot replies. Used as a fallback when the
+# upstream client doesn't tag is_from_host explicitly. Keep this list narrow —
+# real viewer questions should never start with these phrases.
+_HOST_REPLY_PREFIXES = (
+    "dạ, chị/em ơi",
+    "dạ shop",
+    "dạ vâng",
+    "cảm ơn bạn",
+    "cảm ơn anh chị",
+)
+
+
+def _looks_like_host_reply(text: str) -> bool:
+    if not text:
+        return False
+    head = text.strip().lower()[:40]
+    return any(head.startswith(p) for p in _HOST_REPLY_PREFIXES)
+
+
 def _cache_key(shop_id: int, comment_text: str) -> str:
     normalized = comment_text.strip().lower()[:100]
     h = hashlib.md5(normalized.encode()).hexdigest()
@@ -215,6 +234,41 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 comment_data = data.get("comment", {})
                 comment_text = comment_data.get("text", "")
                 external_user_id = comment_data.get("externalUserId")
+                # Upstream client (extension/scraper) marks the host's own
+                # messages so we don't classify them or generate AI replies
+                # against them. Heuristic fallback catches obvious bot prefixes
+                # if the client doesn't set the flag.
+                is_from_host = bool(
+                    comment_data.get("isFromHost")
+                    or comment_data.get("is_from_host")
+                    or _looks_like_host_reply(comment_text)
+                )
+
+                if is_from_host:
+                    # Host/bot comment — persist for the timeline but skip
+                    # classification, suggestion generation, and analytics.
+                    async with async_session() as db:
+                        comment = await session_svc.ingest_comment(
+                            db,
+                            session_id=state.session_id,
+                            shop_id=state.shop_id,
+                            external_user_name=comment_data.get("externalUserName", ""),
+                            text=comment_text,
+                            external_user_id=external_user_id,
+                            intent=None,
+                            confidence=None,
+                            is_spam=False,
+                            is_from_host=True,
+                        )
+                        await db.commit()
+                    await websocket.send_json({
+                        "type": "comment.received",
+                        "comment_id": comment.id,
+                        "comment": comment_data,
+                        "intent": None,
+                        "skipped_reason": "Host comment — không xử lý AI",
+                    })
+                    continue
 
                 # 1. Load shop moderation rules & classify
                 async with async_session() as db:
@@ -236,6 +290,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         intent=classify_result.intent,
                         confidence=classify_result.confidence,
                         is_spam=(classify_result.action == "hide"),
+                        is_from_host=False,
                     )
                     await db.commit()
 
