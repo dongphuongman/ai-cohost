@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from app.core.config import settings, validate_production_settings
 from app.core.database import async_session, engine
+from app.core.migrations import check_migrations_up_to_date
 from app.routers import analytics, auth, billing, faqs, moderation, personas, products, scripts, sessions, shops, tts, videos, voices, webhooks
 from app.ws.handler import websocket_endpoint as ws_handler, _redis as ws_redis
 
@@ -42,6 +43,11 @@ if settings.sentry_dsn:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting AI Co-host API")
+    # Fail-fast migration drift check. Catches the 2026-04-12 incident shape
+    # where code references a column that no migration has applied yet.
+    # In production this raises and aborts startup; in dev it logs a warning
+    # so the developer sees it in their uvicorn output and runs the upgrade.
+    await check_migrations_up_to_date(engine, app_env=settings.app_env)
     yield
     # Graceful shutdown: close connection pools
     logger.info("Shutting down — closing connections")
