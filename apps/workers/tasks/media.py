@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from celery_app import app
 from config import settings
+from dh_providers import DHProviderRouter, GenerateRequest
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,6 @@ def generate_tts(suggestion_id: int, text: str, voice_id: str | None = None) -> 
     return {"status": "not_implemented", "suggestion_id": suggestion_id}
 
 
-HEYGEN_API_URL = "https://api.heygen.com"
-
-
 def _get_video(session: Session, video_id: int) -> dict | None:
     result = session.execute(
         sa.text("SELECT * FROM dh_videos WHERE id = :id"), {"id": video_id}
@@ -63,50 +61,6 @@ def _update_video(session: Session, video_id: int, **kwargs) -> None:
     session.commit()
 
 
-def _add_watermark(video_bytes: bytes) -> bytes:
-    """Add 'Nội dung tạo bởi AI' watermark to video via ffmpeg.
-
-    Watermark: semi-transparent text at bottom-right corner.
-    Falls back to original bytes if ffmpeg is unavailable.
-    """
-    import os
-    import subprocess
-    import tempfile
-
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as inp:
-        inp.write(video_bytes)
-        input_path = inp.name
-
-    output_path = input_path.replace(".mp4", "_wm.mp4")
-
-    try:
-        cmd = [
-            "ffmpeg", "-y", "-i", input_path,
-            "-vf", (
-                "drawtext=text='Nội dung tạo bởi AI':"
-                "fontcolor=white@0.5:fontsize=18:"
-                "x=w-tw-20:y=h-th-20:"
-                "shadowcolor=black@0.3:shadowx=1:shadowy=1"
-            ),
-            "-codec:a", "copy",
-            output_path,
-        ]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
-
-        with open(output_path, "rb") as f:
-            result = f.read()
-        return result
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        logger.warning("ffmpeg watermark failed, returning original video")
-        return video_bytes
-    finally:
-        for p in (input_path, output_path):
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
-
-
 @app.task(
     name="tasks.media.generate_dh_video",
     soft_time_limit=600,
@@ -114,12 +68,17 @@ def _add_watermark(video_bytes: bytes) -> bytes:
     acks_late=True,
 )
 def generate_dh_video(video_id: int) -> dict:
-    """Generate digital human video via HeyGen API.
+    """Generate a digital human video via the provider router.
 
-    The output video MUST include a visible 'Nội dung tạo bởi AI'
-    watermark overlay to comply with Vietnamese regulations on synthetic media.
+    The router selects LiteAvatar by default and falls back to HeyGen when
+    LiteAvatar is unavailable, doesn't support the requested avatar, or its
+    generate() call fails. When ``LITE_AVATAR_URL`` is unset (Đợt 1 default),
+    the router always picks HeyGen — production behavior is unchanged.
+
+    The output video MUST include a visible 'Nội dung tạo bởi AI' watermark
+    to comply with Vietnamese regulations on synthetic media. Watermarking
+    runs inside each provider's ``finalize()`` step.
     """
-    import os
     import time
     from datetime import datetime, timedelta, timezone
 
@@ -133,103 +92,57 @@ def generate_dh_video(video_id: int) -> dict:
         _update_video(session, video_id, status="processing")
 
         try:
-            if not settings.heygen_api_key:
-                raise RuntimeError("HEYGEN_API_KEY not configured")
-
-            # 1. Resolve voice config
-            voice_config: dict
+            # 1. Resolve voice clone (ElevenLabs voice id) if specified
+            voice_id: str | None = None
             if video["voice_clone_id"]:
                 vc = _get_voice(session, video["voice_clone_id"])
                 if vc and vc["provider_voice_id"]:
-                    voice_config = {
-                        "type": "elevenlabs",
-                        "voice_id": vc["provider_voice_id"],
-                        "input_text": video["source_text"],
-                    }
-                else:
-                    voice_config = {
-                        "type": "text",
-                        "input_text": video["source_text"],
-                    }
-            else:
-                voice_config = {
-                    "type": "text",
-                    "input_text": video["source_text"],
-                }
+                    voice_id = vc["provider_voice_id"]
 
-            # 2. Call HeyGen API to create video
-            payload = {
-                "video_inputs": [{
-                    "character": {
-                        "type": "avatar",
-                        "avatar_id": video["avatar_preset"] or "default_avatar",
-                    },
-                    "voice": voice_config,
-                    "background": {
-                        "type": "color",
-                        "value": video["background"] or "#FFFFFF",
-                    },
-                }],
-                "dimension": {"width": 1280, "height": 720},
-            }
-
-            response = httpx.post(
-                f"{HEYGEN_API_URL}/v2/video/generate",
-                headers={"X-Api-Key": settings.heygen_api_key},
-                json=payload,
-                timeout=60,
+            # 2. Build provider-agnostic request
+            request = GenerateRequest(
+                text=video["source_text"],
+                avatar_id=video["avatar_preset"] or "default_avatar",
+                voice_id=voice_id,
+                background=video["background"] or "#FFFFFF",
+                prefer_quality=bool(video.get("prefer_quality", False)),
+                shop_id=shop_id,
             )
 
-            if response.status_code != 200:
-                raise RuntimeError(f"HeyGen API error: {response.status_code} {response.text}")
+            # 3. Route → trigger generation
+            router = DHProviderRouter()
+            create_response = router.generate(request)
 
-            heygen_video_id = response.json()["data"]["video_id"]
-            _update_video(session, video_id, provider_job_id=heygen_video_id)
+            _update_video(
+                session,
+                video_id,
+                provider=create_response.provider,
+                provider_job_id=create_response.job_id,
+            )
 
-            # 3. Poll for completion (max ~10 minutes)
+            # 4. Poll until ready (max ~10 minutes), then finalize
             max_polls = 60
             for _ in range(max_polls):
                 time.sleep(10)
 
-                status_resp = httpx.get(
-                    f"{HEYGEN_API_URL}/v1/video_status.get",
-                    params={"video_id": heygen_video_id},
-                    headers={"X-Api-Key": settings.heygen_api_key},
-                    timeout=30,
-                )
+                status = router.get_status(create_response.provider, create_response.job_id)
 
-                status_data = status_resp.json()["data"]
+                if status.status == "ready":
+                    finalized = router.finalize(status, shop_id=shop_id)
 
-                if status_data["status"] == "completed":
-                    video_url_heygen = status_data["video_url"]
-                    duration = status_data.get("duration", 0)
-
-                    # 4. Download video from HeyGen
-                    video_bytes = httpx.get(video_url_heygen, timeout=120).content
-
-                    # 5. Add watermark (mandatory)
-                    video_bytes = _add_watermark(video_bytes)
-
-                    # 6. Store video
-                    # TODO: Upload to R2/S3 when storage is ready
-                    import uuid
-                    video_key = f"videos/{shop_id}/{video_id}_{uuid.uuid4().hex[:8]}.mp4"
-                    stored_url = f"storage://{video_key}"
-
-                    # 7. Update DB
                     now = datetime.now(timezone.utc)
                     _update_video(
                         session,
                         video_id,
                         status="ready",
-                        video_url=stored_url,
-                        video_duration_seconds=int(duration),
-                        file_size_bytes=len(video_bytes),
+                        video_url=finalized.video_url,
+                        video_duration_seconds=finalized.duration_seconds,
+                        file_size_bytes=finalized.file_size_bytes,
+                        credits_used=finalized.cost_usd or None,
                         completed_at=now,
                         expires_at=now + timedelta(days=30),
                     )
 
-                    # 8. Notify
                     _redis_client.publish(
                         f"notifications:{shop_id}",
                         json.dumps({
@@ -240,16 +153,23 @@ def generate_dh_video(video_id: int) -> dict:
                     )
 
                     logger.info(
-                        "DH video %d ready: duration=%ds size=%d",
-                        video_id, int(duration), len(video_bytes),
+                        "DH video %d ready via %s: duration=%ss size=%s cost=$%.4f",
+                        video_id,
+                        finalized.provider,
+                        finalized.duration_seconds,
+                        finalized.file_size_bytes,
+                        finalized.cost_usd,
                     )
-                    return {"status": "ready", "video_id": video_id}
+                    return {"status": "ready", "video_id": video_id, "provider": finalized.provider}
 
-                elif status_data["status"] == "failed":
-                    error_msg = status_data.get("error", "Unknown HeyGen error")
-                    raise RuntimeError(f"HeyGen processing failed: {error_msg}")
+                if status.status == "failed":
+                    raise RuntimeError(
+                        f"{status.provider} processing failed: {status.error_message}"
+                    )
 
-            raise RuntimeError("HeyGen processing timeout after 10 minutes")
+            raise RuntimeError(
+                f"{create_response.provider} processing timeout after 10 minutes"
+            )
 
         except Exception as exc:
             logger.exception("DH video %d failed", video_id)
