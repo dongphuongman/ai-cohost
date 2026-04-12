@@ -8,8 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.media import DhVideo, VoiceClone
+from app.models.tenant import Shop
 from app.schemas.videos import VideoGenerateRequest
 from app.services.usage import check_quota, track_usage
+
+# Plans allowed to request HeyGen-quality video. Lower tiers are forced to
+# LiteAvatar (Đợt 2) or the default router path.
+PREFER_QUALITY_PLANS = {"pro", "enterprise"}
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +43,20 @@ async def generate_video(
             f"vui lòng nâng cấp gói."
         )
 
-    # 2. Validate voice clone if specified
+    # 2. Plan gate for prefer_quality — only paid tiers can force HeyGen.
+    # Without this gate, any user could POST prefer_quality=true and pin the
+    # $0.40/min path, bypassing the LiteAvatar cost optimization.
+    prefer_quality = data.prefer_quality
+    if prefer_quality:
+        plan_result = await db.execute(select(Shop.plan).where(Shop.id == shop_id))
+        plan = plan_result.scalar_one_or_none()
+        if plan not in PREFER_QUALITY_PLANS:
+            raise ValueError(
+                "Tính năng chất lượng cao chỉ dành cho gói Pro và Enterprise. "
+                "Vui lòng nâng cấp gói."
+            )
+
+    # 3. Validate voice clone if specified
     if data.voice_clone_id is not None:
         vc_result = await db.execute(
             select(VoiceClone).where(
@@ -53,10 +71,10 @@ async def generate_video(
         if voice.status != "ready":
             raise ValueError("Giọng nói chưa sẵn sàng sử dụng")
 
-    # 3. Create DB record — has_watermark is ALWAYS True
-    # provider defaults to 'liteavatar' (cheap self-hosted) at the DB level;
-    # the worker's DHProviderRouter overwrites it with the actual provider
-    # selected at execution time (heygen fallback when liteavatar is down).
+    # 4. Create DB record — has_watermark is ALWAYS True.
+    # Initial provider is "heygen" because LITE_AVATAR_URL is unset in Đợt 1,
+    # so the worker's DHProviderRouter always selects HeyGen. The worker
+    # overwrites this field with the actual provider chosen at execution time.
     video = DhVideo(
         shop_id=shop_id,
         created_by=user_id,
@@ -65,8 +83,8 @@ async def generate_video(
         avatar_preset=data.avatar_preset,
         voice_clone_id=data.voice_clone_id,
         background=data.background or "#FFFFFF",
-        provider="liteavatar",
-        prefer_quality=data.prefer_quality,
+        provider="heygen",
+        prefer_quality=prefer_quality,
         status="queued",
         has_watermark=True,
     )

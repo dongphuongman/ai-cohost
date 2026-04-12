@@ -79,6 +79,17 @@ async def _get_redis() -> aioredis.Redis:
     return _redis
 
 
+async def get_redis() -> aioredis.Redis:
+    """Public accessor for the Redis client used by auto-reply service.
+
+    Other modules should use this function instead of importing ``_get_redis``
+    directly. The underscore-prefixed version is module-private and exists for
+    backward compatibility with existing callers inside this module and its
+    tests.
+    """
+    return await _get_redis()
+
+
 async def should_auto_reply(
     comment: Comment,
     suggestion: Suggestion,

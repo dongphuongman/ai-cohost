@@ -62,6 +62,7 @@ class Comment(Base):
     confidence: Mapped[float | None] = mapped_column(Float)
 
     is_spam: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    is_from_host: Mapped[bool] = mapped_column(Boolean, server_default="false")
     is_processed: Mapped[bool] = mapped_column(Boolean, server_default="false")
 
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))

@@ -3,8 +3,10 @@ import hashlib
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 
 import redis.asyncio as aioredis
+import sentry_sdk
 from fastapi import WebSocket, WebSocketDisconnect, Query
 from jose import JWTError
 
@@ -22,7 +24,7 @@ from app.services.auto_reply import (
     should_auto_reply,
     record_undo,
     disable_auto_reply,
-    _get_redis as get_auto_reply_redis,
+    get_redis as get_auto_reply_redis,
 )
 from app.services.embed_client import enqueue_suggestion_task
 
@@ -34,6 +36,20 @@ _redis = aioredis.from_url(settings.redis_url)
 _WS_COMMENT_RATE_LIMIT = 30  # max comments per minute per shop
 _WS_COMMENT_RATE_WINDOW = 60  # seconds
 
+# Valid values for the `action` field on an inbound `suggestion.action` message.
+# Named `_ALLOWED_SUGGESTION_ACTIONS` (not `_ALLOWED_ACTIONS`) to avoid confusion
+# with `app.services.insights.allowed_actions.ALLOWED_ACTIONS`, which is an
+# unrelated registry of dashboard navigation actions consumed by the LLM.
+_ALLOWED_SUGGESTION_ACTIONS: frozenset[str] = frozenset({
+    "sent",
+    "pasted_not_sent",
+    "read",
+    "dismissed",
+    "edited",
+    "auto_sent",
+    "auto_cancelled",
+})
+
 
 async def _check_ws_rate_limit(shop_id: int) -> bool:
     """Return True if within rate limit, False if exceeded."""
@@ -42,6 +58,167 @@ async def _check_ws_rate_limit(shop_id: int) -> bool:
     if count == 1:
         await _redis.expire(key, _WS_COMMENT_RATE_WINDOW + 5)
     return count <= _WS_COMMENT_RATE_LIMIT
+
+
+# Heuristic prefixes for AI/host bot replies. Used as a fallback when the
+# upstream client doesn't tag is_from_host explicitly. Keep this list narrow —
+# real viewer questions should never start with these phrases.
+_HOST_REPLY_PREFIXES = (
+    "dạ, chị/em ơi",
+    "dạ shop",
+    "dạ vâng",
+    "cảm ơn bạn",
+    "cảm ơn anh chị",
+)
+
+
+def _looks_like_host_reply(text: str) -> bool:
+    if not text:
+        return False
+    head = text.strip().lower()[:40]
+    return any(head.startswith(p) for p in _HOST_REPLY_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
+# Host-loop self-reply detection
+# ---------------------------------------------------------------------------
+#
+# When the AI generates a suggestion and the host actually sends it to
+# Facebook chat, the live chat panel shows the message back as a normal
+# comment. The Chrome extension then re-scrapes that message and pushes it
+# to the backend as a fresh `comment.new`. Without intervention the bot's
+# own reply gets:
+#   * counted as a viewer comment in the analytics rollups,
+#   * fed back into the suggestion pipeline (cost & latency waste),
+#   * surfaced inside "Top questions" on the dashboard (visible to users).
+#
+# This is exactly what we caught in session 17 during the 2026-04-12 UAT.
+# The narrow ``_HOST_REPLY_PREFIXES`` allowlist can't cover every persona
+# voice, so we add a content-equality fallback against the shop's own
+# recently-sent suggestions.
+
+# How long after a suggestion is sent we still consider an incoming
+# comment to be a possible self-reply re-scrape. 5 minutes is comfortably
+# above the FB-chat lag + extension polling cycle (~5–10s) without bloating
+# the per-query result set under the 30 cmts/min rate limit.
+_SELF_REPLY_WINDOW_MINUTES = 5
+
+# Prefix length for "fuzzy" match. Handles cases where FB truncates long
+# messages, the host edits a trailing word, or the scraper trims emojis.
+# 30 chars is enough to be uniquely identifying for any non-trivial reply.
+_SELF_REPLY_PREFIX_LEN = 30
+
+# Skip very short comments to avoid false positives on common viewer
+# replies like "?", "ok", "có ạ" — these are too short to fingerprint and
+# would also be too short to ever be a meaningful AI suggestion.
+_SELF_REPLY_MIN_LEN = 3
+
+
+def _normalize_for_dedup(text: str | None) -> str:
+    """Lower + strip for case/whitespace-insensitive comparison."""
+    return (text or "").strip().lower()
+
+
+def _is_self_reply_match(comment_text: str, suggestion_texts: list[str]) -> bool:
+    """Pure-logic half of host-loop detection.
+
+    Given an incoming comment and a list of suggestion texts that this
+    shop sent inside the recent window, return True if the comment looks
+    like a re-scrape of one of those suggestions.
+
+    Match policy (in order):
+      1. exact equality on normalized text
+      2. 30-char prefix in either direction (handles FB UI truncation,
+         host appending a word, or trailing emoji loss during scrape)
+
+    Pure function — no DB, no network. Direct unit-test target.
+    """
+    norm_comment = _normalize_for_dedup(comment_text)
+    if len(norm_comment) < _SELF_REPLY_MIN_LEN:
+        return False
+
+    for sug in suggestion_texts:
+        norm_sug = _normalize_for_dedup(sug)
+        if len(norm_sug) < _SELF_REPLY_MIN_LEN:
+            continue
+
+        if norm_comment == norm_sug:
+            return True
+
+        if (
+            len(norm_comment) >= _SELF_REPLY_PREFIX_LEN
+            and norm_sug.startswith(norm_comment[:_SELF_REPLY_PREFIX_LEN])
+        ):
+            return True
+
+        if (
+            len(norm_sug) >= _SELF_REPLY_PREFIX_LEN
+            and norm_comment.startswith(norm_sug[:_SELF_REPLY_PREFIX_LEN])
+        ):
+            return True
+
+    return False
+
+
+async def _fetch_recent_suggestion_texts(
+    db, session_id: int, *, window_minutes: int = _SELF_REPLY_WINDOW_MINUTES
+) -> list[str]:
+    """Return texts of every suggestion in this session within the recent window.
+
+    No status filter on purpose. The earlier version of this query
+    restricted to ``status='sent'`` on the assumption that other states
+    (``pasted_not_sent``, ``suggested``) could not have been delivered to
+    Facebook chat and therefore could not be re-scraped. That assumption
+    turned out to be wrong:
+
+    * ``pasted_not_sent`` is set when the extension's Quick Paste action
+      drops the suggestion text into the FB chat input. The extension
+      has no reliable signal for whether the host then clicks Send in
+      FB's own UI — so this status is really *pasted-and-maybe-sent*.
+      Verified on the 2026-04-12 dataset: 50 viewer comments exact-text
+      matched suggestions whose status was ``pasted_not_sent`` (e.g.
+      session 15, suggestion #267 → comment #460).
+    * ``suggested`` matches happen on a race: the comment re-scrape can
+      arrive over the WS before the extension PATCHes the suggestion's
+      status to ``sent``/``pasted_not_sent``. 11 such matches existed
+      in the same dataset.
+
+    Status is an extension UI state, not a "delivered to Facebook"
+    signal, so we don't gate detection on it. The 5-minute time window
+    plus same-session scope is the actual safety rail: the probability
+    that a viewer types one of the shop's AI suggestions verbatim, in
+    the same session, within 5 minutes of generation, is effectively
+    zero.
+
+    Bounded by both the time window and a hard row limit so a runaway
+    session can't blow up the per-comment query latency.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    result = await db.execute(
+        select(Suggestion.text_)
+        .where(
+            Suggestion.session_id == session_id,
+            Suggestion.created_at >= cutoff,
+        )
+        .order_by(Suggestion.created_at.desc())
+        .limit(50)
+    )
+    return [row[0] for row in result.all() if row[0]]
+
+
+async def is_likely_self_reply(db, session_id: int, comment_text: str) -> bool:
+    """Detect host-loop self-reply: AI suggestion → host sent → re-scrape.
+
+    Thin DB wrapper around ``_is_self_reply_match`` so the matching logic
+    stays pure and unit-testable. Cheap fast-path for empty/short text
+    avoids touching the DB at all in the common viewer-comment case.
+    """
+    if not comment_text or len(comment_text.strip()) < _SELF_REPLY_MIN_LEN:
+        return False
+    recent = await _fetch_recent_suggestion_texts(db, session_id)
+    if not recent:
+        return False
+    return _is_self_reply_match(comment_text, recent)
 
 
 def _cache_key(shop_id: int, comment_text: str) -> str:
@@ -215,6 +392,59 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 comment_data = data.get("comment", {})
                 comment_text = comment_data.get("text", "")
                 external_user_id = comment_data.get("externalUserId")
+                # Upstream client (extension/scraper) marks the host's own
+                # messages so we don't classify them or generate AI replies
+                # against them. Heuristic fallback catches obvious bot prefixes
+                # if the client doesn't set the flag.
+                is_from_host = bool(
+                    comment_data.get("isFromHost")
+                    or comment_data.get("is_from_host")
+                    or _looks_like_host_reply(comment_text)
+                )
+
+                # Host-loop self-reply detection. Only run when the cheaper
+                # checks above haven't already classified the comment as host
+                # (saves a DB roundtrip on the common viewer-comment path).
+                # See _is_self_reply_match for the matching contract.
+                if not is_from_host:
+                    async with async_session() as db:
+                        if await is_likely_self_reply(
+                            db, state.session_id, comment_text
+                        ):
+                            is_from_host = True
+                            logger.info(
+                                "WS host-loop detected: session=%s shop=%s "
+                                "text=%r",
+                                state.session_uuid,
+                                state.shop_id,
+                                comment_text[:80],
+                            )
+
+                if is_from_host:
+                    # Host/bot comment — persist for the timeline but skip
+                    # classification, suggestion generation, and analytics.
+                    async with async_session() as db:
+                        comment = await session_svc.ingest_comment(
+                            db,
+                            session_id=state.session_id,
+                            shop_id=state.shop_id,
+                            external_user_name=comment_data.get("externalUserName", ""),
+                            text=comment_text,
+                            external_user_id=external_user_id,
+                            intent=None,
+                            confidence=None,
+                            is_spam=False,
+                            is_from_host=True,
+                        )
+                        await db.commit()
+                    await websocket.send_json({
+                        "type": "comment.received",
+                        "comment_id": comment.id,
+                        "comment": comment_data,
+                        "intent": None,
+                        "skipped_reason": "Host comment — không xử lý AI",
+                    })
+                    continue
 
                 # 1. Load shop moderation rules & classify
                 async with async_session() as db:
@@ -236,6 +466,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                         intent=classify_result.intent,
                         confidence=classify_result.confidence,
                         is_spam=(classify_result.action == "hide"),
+                        is_from_host=False,
                     )
                     await db.commit()
 
@@ -312,8 +543,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 suggestion_id = data.get("suggestion_id")
                 action = data.get("action")
                 edited_text = data.get("edited_text")
-                _ALLOWED_ACTIONS = {"sent", "pasted_not_sent", "read", "dismissed", "edited", "auto_sent", "auto_cancelled"}
-                if suggestion_id and action and action in _ALLOWED_ACTIONS:
+                if suggestion_id and action and action in _ALLOWED_SUGGESTION_ACTIONS:
                     try:
                         async with async_session() as db:
                             await session_svc.update_suggestion_action(
@@ -384,6 +614,38 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     await db.commit()
             except Exception:
                 pass
+    except Exception as exc:
+        # Catch-all for ANY uncaught error inside the message-processing
+        # loop. Without this, exceptions silently kill the WS connection
+        # and never reach Sentry — that's exactly how the 2026-04-12
+        # is_from_host migration drift went undetected (every comment.new
+        # raised UndefinedColumnError, the connection died, the extension's
+        # optimistic UI counter still ticked up, and nobody saw the alert).
+        #
+        # Tag the event so it's easy to filter in Sentry, then re-raise
+        # WebSocketDisconnect-style cleanup so the session is marked
+        # interrupted instead of left as "running" forever.
+        logger.exception("WS handler raised uncaught exception")
+        sentry_sdk.set_tag("ws.user_id", state.user_id)
+        sentry_sdk.set_tag("ws.shop_id", state.shop_id)
+        sentry_sdk.set_tag("ws.session_uuid", state.session_uuid)
+        sentry_sdk.capture_exception(exc)
+
+        if state.pubsub_task:
+            state.pubsub_task.cancel()
+        if state.session_uuid:
+            try:
+                async with async_session() as db:
+                    await session_svc.mark_session_interrupted(db, state.session_uuid)
+                    await db.commit()
+            except Exception:
+                pass
+        # Try to close the socket cleanly so the client gets a real close
+        # frame instead of a TCP RST. Best-effort.
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except Exception:
+            pass
 
 
 async def _listen_suggestions(websocket: WebSocket, state: WSConnectionState) -> None:
@@ -454,7 +716,6 @@ async def _listen_suggestions(websocket: WebSocket, state: WSConnectionState) ->
                             logger.debug("Auto-reply check failed", exc_info=True)
 
                     if auto_reply_decision and auto_reply_decision.allowed:
-                        from datetime import datetime, timedelta, timezone
                         undo_deadline = datetime.now(timezone.utc) + timedelta(seconds=15)
                         await websocket.send_json({
                             "type": "suggestion.auto_reply",

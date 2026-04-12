@@ -2,6 +2,29 @@
 
 All notable changes to AI Co-host will be documented in this file.
 
+## [0.1.0.0] - 2026-04-12
+
+### Added
+- F6 Auth / Billing / Multi-tenancy: new routers, schemas, migrations, and service wiring for shop-scoped access control and plan-based gating
+- AI Insights: allowed-actions registry with plan-based filtering so the LLM can only recommend dashboard features a shop actually has access to
+- Plan-gate test coverage for `prefer_quality` digital-human video path (Pro/Enterprise only)
+- Insights orchestration tests covering cache hit, Gemini init failure fallback, retry loop on generic output, and final-attempt hallucination filtering
+- Local test report, setup guide (md + docx), and live-stream simulator under `docs/` / repo root
+
+### Changed
+- Session Insights: LLM responses are now validated against the allowed-actions registry and rejected when they reference features that don't exist (hallucination guard)
+- Session Insights: hallucinated-item tracking uses list identity (`is`) instead of `id(obj)`, avoiding the theoretical GC-reuse false-positive
+- Session Insights: `_format_duration` rewritten with named `total_minutes` / `hours` / `remaining_minutes` locals for readability
+- Allowed Actions: duplicate-key guard is now a runtime `raise RuntimeError` (not `assert`) so `python -O` cannot strip it
+- Auto-Reply: added public `get_redis()` accessor; `ws/handler.py` now imports the public name instead of the module-private `_get_redis`
+- WebSocket handler: lifted inline suggestion-action whitelist to module-level `_ALLOWED_SUGGESTION_ACTIONS` frozenset (renamed from the colliding `_ALLOWED_ACTIONS`)
+- WebSocket handler: removed duplicate inline `from datetime import ...`
+- Worker DH providers (HeyGen): updated pipeline handling
+- Extension: test layout migrated from `__tests__/` to `tests/`
+
+### Fixed
+- Grounding AI Insights in real UI via `FORBIDDEN_PHRASES` + retry-with-suffix feedback, preventing stale feature names from leaking through cached prompts
+
 ## [0.0.5.0] - 2026-04-12
 
 ### Added

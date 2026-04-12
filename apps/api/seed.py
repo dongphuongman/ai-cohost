@@ -35,7 +35,7 @@ async def seed():
         INSERT INTO shops (id, name, slug, industry, team_size, owner_user_id, plan, plan_status,
                            trial_ends_at)
         VALUES (1, 'Beauty Demo Shop', 'beauty-demo', 'Mỹ phẩm', '1',
-                1, 'trial', 'active', now() + interval '14 days')
+                1, 'pro', 'active', now() + interval '14 days')
         """))
 
         # 3. Shop member (owner)

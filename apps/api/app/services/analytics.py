@@ -16,6 +16,7 @@ from app.schemas.analytics import (
     OverviewStats,
     ProductMention,
     RecentSession,
+    SessionComparison,
     SessionDetailResponse,
     SessionListItem,
     SessionListResponse,
@@ -181,6 +182,55 @@ async def list_sessions(
 # --- Session detail ---
 
 
+async def _compute_duration_seconds(
+    db: AsyncSession, session: LiveSession
+) -> int | None:
+    """Calculate session duration in seconds with fallback chain.
+
+    Priority:
+        1. Stored ``duration_seconds`` (set by ``end_session``).
+        2. ``ended_at - started_at`` (if both exist but stored value is null).
+        3. ``last_comment.received_at - started_at`` (session not ended cleanly).
+        4. ``None`` if there is no usable signal.
+    """
+    if session.duration_seconds:
+        return session.duration_seconds
+
+    if session.started_at and session.ended_at:
+        return int((session.ended_at - session.started_at).total_seconds())
+
+    if session.started_at:
+        last = await db.execute(
+            select(func.max(Comment.received_at)).where(
+                Comment.session_id == session.id
+            )
+        )
+        last_at = last.scalar_one_or_none()
+        if last_at:
+            seconds = int((last_at - session.started_at).total_seconds())
+            return seconds if seconds > 0 else None
+
+    return None
+
+
+async def _compute_avg_latency_ms(
+    db: AsyncSession, session_id: int
+) -> int | None:
+    """Aggregate average suggestion latency for a session.
+
+    Stored ``LiveSession.avg_latency_ms`` is not currently maintained by the
+    worker, so we compute on-the-fly from ``suggestions.latency_ms``.
+    """
+    result = await db.execute(
+        select(func.avg(Suggestion.latency_ms)).where(
+            Suggestion.session_id == session_id,
+            Suggestion.latency_ms.isnot(None),
+        )
+    )
+    avg = result.scalar_one_or_none()
+    return int(avg) if avg is not None else None
+
+
 async def get_session_detail(
     db: AsyncSession, shop_id: int, session_id: int
 ) -> SessionDetailResponse | None:
@@ -193,7 +243,14 @@ async def get_session_detail(
     session = result.scalar_one_or_none()
     if not session:
         return None
-    return SessionDetailResponse.model_validate(session)
+
+    detail = SessionDetailResponse.model_validate(session)
+    # Override with freshly computed values — stored columns can drift if the
+    # session was interrupted or the worker never wrote latency back.
+    detail.duration_seconds = await _compute_duration_seconds(db, session)
+    if detail.avg_latency_ms is None:
+        detail.avg_latency_ms = await _compute_avg_latency_ms(db, session_id)
+    return detail
 
 
 # --- Chart: comments per minute ---
@@ -202,17 +259,21 @@ async def get_session_detail(
 async def get_session_chart(
     db: AsyncSession, shop_id: int, session_id: int
 ) -> list[ChartPoint]:
+    # Use raw SQL: SQLAlchemy binds `'minute'` as a separate parameter each
+    # time it's emitted, so func.date_trunc(...) in SELECT vs. GROUP BY
+    # becomes `date_trunc($1, ...)` vs `date_trunc($4, ...)` — PostgreSQL
+    # treats those as distinct expressions and raises a GROUP BY error.
     result = await db.execute(
-        select(
-            func.date_trunc("minute", Comment.received_at).label("minute"),
-            func.count(Comment.id).label("comment_count"),
-        )
-        .where(
-            Comment.session_id == session_id,
-            Comment.shop_id == shop_id,
-        )
-        .group_by(func.date_trunc("minute", Comment.received_at))
-        .order_by(func.date_trunc("minute", Comment.received_at))
+        text("""
+            SELECT date_trunc('minute', received_at) AS minute,
+                   COUNT(id) AS comment_count
+            FROM comments
+            WHERE session_id = :session_id
+              AND shop_id = :shop_id
+            GROUP BY 1
+            ORDER BY 1
+        """),
+        {"session_id": session_id, "shop_id": shop_id},
     )
     return [
         ChartPoint(minute=row.minute, comment_count=row.comment_count)
@@ -255,18 +316,35 @@ async def get_session_products(
 async def get_session_top_questions(
     db: AsyncSession, shop_id: int, session_id: int
 ) -> list[TopQuestion]:
+    """Top frequently-asked questions FROM VIEWERS ONLY.
+
+    Filters out:
+        - host/bot comments (``is_from_host = true``)
+        - spam (``is_spam = true``)
+        - very short noise (length <= 5)
+    Groups by exact text + intent and orders by frequency.
+    """
     result = await db.execute(
-        select(Comment.text_, Comment.intent)
-        .where(
-            Comment.session_id == session_id,
-            Comment.shop_id == shop_id,
-            Comment.intent.in_(["question", "pricing", "shipping", "complaint"]),
-        )
-        .order_by(Comment.received_at.desc())
-        .limit(10)
+        text("""
+            SELECT
+                c.text  AS text,
+                c.intent AS intent,
+                COUNT(*) AS occurrences
+            FROM comments c
+            WHERE c.session_id = :session_id
+              AND c.shop_id = :shop_id
+              AND c.is_from_host = false
+              AND c.is_spam = false
+              AND c.intent IN ('question', 'pricing', 'shipping', 'complaint')
+              AND length(c.text) > 5
+            GROUP BY c.text, c.intent
+            ORDER BY occurrences DESC, c.text
+            LIMIT 10
+        """),
+        {"session_id": session_id, "shop_id": shop_id},
     )
     return [
-        TopQuestion(text=row.text_, intent=row.intent)
+        TopQuestion(text=row.text, intent=row.intent)
         for row in result.all()
     ]
 
@@ -382,6 +460,242 @@ async def export_session_csv(db: AsyncSession, shop_id: int, session_id: int) ->
         ])
 
     return output.getvalue()
+
+
+# --- Comparison vs 30-day average ---
+
+
+_COMPARISON_MIN_SAMPLES = 5
+
+
+async def get_session_comparison(
+    db: AsyncSession,
+    shop_id: int,
+    session_id: int,
+    *,
+    detail: SessionDetailResponse | None = None,
+) -> SessionComparison:
+    """Compare a session against the shop's last-30-day average.
+
+    Returns a per-metric percentage diff. If the shop has fewer than
+    ``_COMPARISON_MIN_SAMPLES`` prior ended sessions in the window, all diffs
+    are returned as ``None`` so the UI can hide noisy indicators.
+
+    Callers that already have a ``SessionDetailResponse`` for this session
+    (e.g. the insights service's ``_gather_context``) may pass it via the
+    ``detail`` kwarg to avoid the extra ``get_session_detail`` roundtrip
+    (1 main SELECT + 2 aggregate subqueries).
+    """
+    if detail is None:
+        detail = await get_session_detail(db, shop_id, session_id)
+    if detail is None:
+        return SessionComparison()
+
+    result = await db.execute(
+        text("""
+            SELECT
+                COUNT(*) AS sample,
+                AVG(COALESCE(
+                    duration_seconds,
+                    EXTRACT(EPOCH FROM (ended_at - started_at))::INT
+                )) AS avg_duration,
+                AVG(comments_count) AS avg_comments,
+                AVG(suggestions_count) AS avg_suggestions,
+                AVG(CASE
+                    WHEN suggestions_count > 0
+                    THEN sent_count::FLOAT / suggestions_count * 100
+                    ELSE NULL
+                END) AS avg_adoption
+            FROM live_sessions
+            WHERE shop_id = :shop_id
+              AND id != :session_id
+              AND ended_at IS NOT NULL
+              AND ended_at > NOW() - INTERVAL '30 days'
+        """),
+        {"shop_id": shop_id, "session_id": session_id},
+    )
+    row = result.first()
+    sample = int(row.sample or 0) if row else 0
+
+    if sample < _COMPARISON_MIN_SAMPLES:
+        return SessionComparison(sample_size=sample)
+
+    def diff(current: float | int | None, baseline: float | None) -> float | None:
+        if current is None or baseline is None or baseline == 0:
+            return None
+        return round((float(current) - float(baseline)) / float(baseline) * 100, 1)
+
+    current_adoption = (
+        (detail.sent_count / detail.suggestions_count * 100)
+        if detail.suggestions_count > 0
+        else None
+    )
+
+    return SessionComparison(
+        duration=diff(detail.duration_seconds, row.avg_duration),
+        comments=diff(detail.comments_count, row.avg_comments),
+        suggestions=diff(detail.suggestions_count, row.avg_suggestions),
+        adoption=diff(current_adoption, row.avg_adoption),
+        sample_size=sample,
+    )
+
+
+# --- Insight context (rich data for LLM grounding) ---
+
+
+async def get_uncovered_comments(
+    db: AsyncSession, shop_id: int, session_id: int, limit: int = 10
+) -> list[dict]:
+    """Viewer comments that received NO suggestion — opportunities for the AI
+    to cover next time. Filters spam, host messages, and very short noise.
+    Groups by exact text so repeated identical asks bubble up.
+    """
+    result = await db.execute(
+        text("""
+            SELECT c.text, c.intent, COUNT(*) AS freq
+            FROM comments c
+            LEFT JOIN suggestions s ON s.comment_id = c.id
+            WHERE c.session_id = :session_id
+              AND c.shop_id = :shop_id
+              AND c.is_from_host = false
+              AND c.is_spam = false
+              AND s.id IS NULL
+              AND length(c.text) > 5
+            GROUP BY c.text, c.intent
+            ORDER BY freq DESC, c.text
+            LIMIT :lim
+        """),
+        {"session_id": session_id, "shop_id": shop_id, "lim": limit},
+    )
+    return [
+        {"text": r.text, "intent": r.intent, "freq": int(r.freq)}
+        for r in result.all()
+    ]
+
+
+async def get_repeated_questions(
+    db: AsyncSession, shop_id: int, session_id: int, limit: int = 10
+) -> list[dict]:
+    """Questions asked ≥2 times in the session. ``has_suggestion`` flags
+    whether the AI replied to ANY occurrence — if False, this is a clear FAQ
+    candidate.
+    """
+    result = await db.execute(
+        text("""
+            SELECT
+                c.text,
+                c.intent,
+                COUNT(*) AS ask_count,
+                BOOL_OR(s.id IS NOT NULL) AS has_suggestion
+            FROM comments c
+            LEFT JOIN suggestions s ON s.comment_id = c.id
+            WHERE c.session_id = :session_id
+              AND c.shop_id = :shop_id
+              AND c.is_from_host = false
+              AND c.is_spam = false
+              AND length(c.text) > 8
+            GROUP BY c.text, c.intent
+            HAVING COUNT(*) >= 2
+            ORDER BY ask_count DESC, c.text
+            LIMIT :lim
+        """),
+        {"session_id": session_id, "shop_id": shop_id, "lim": limit},
+    )
+    return [
+        {
+            "text": r.text,
+            "intent": r.intent,
+            "ask_count": int(r.ask_count),
+            "has_suggestion": bool(r.has_suggestion),
+        }
+        for r in result.all()
+    ]
+
+
+async def get_mentioned_products_with_gaps(
+    db: AsyncSession, shop_id: int, session_id: int, limit: int = 5
+) -> list[dict]:
+    """Products linked to this session via the suggestion RAG ids, with data
+    completeness flags so the LLM can recommend filling specific gaps.
+
+    Joining via ``rag_product_ids`` (rather than fuzzy text matching against
+    comments) keeps the signal high and avoids false matches.
+    """
+    result = await db.execute(
+        text("""
+            SELECT
+                p.id,
+                p.name,
+                p.price,
+                p.description,
+                p.highlights,
+                COUNT(*) AS mention_count,
+                (SELECT COUNT(*) FROM product_faqs pf
+                 WHERE pf.product_id = p.id AND pf.shop_id = :shop_id) AS faq_count,
+                (p.price IS NOT NULL) AS has_price,
+                (p.description IS NOT NULL AND length(p.description) > 20) AS has_description,
+                (p.highlights IS NOT NULL AND array_length(p.highlights, 1) > 0) AS has_highlights
+            FROM suggestions s
+            CROSS JOIN LATERAL unnest(s.rag_product_ids) AS pid
+            JOIN products p ON p.id = pid AND p.shop_id = :shop_id
+            WHERE s.session_id = :session_id
+              AND s.shop_id = :shop_id
+              AND s.rag_product_ids IS NOT NULL
+            GROUP BY p.id, p.name, p.price, p.description, p.highlights
+            ORDER BY mention_count DESC
+            LIMIT :lim
+        """),
+        {"session_id": session_id, "shop_id": shop_id, "lim": limit},
+    )
+    return [
+        {
+            "id": int(r.id),
+            "name": r.name,
+            "price": float(r.price) if r.price is not None else None,
+            "mention_count": int(r.mention_count),
+            "faq_count": int(r.faq_count),
+            "has_price": bool(r.has_price),
+            "has_description": bool(r.has_description),
+            "has_highlights": bool(r.has_highlights),
+        }
+        for r in result.all()
+    ]
+
+
+async def get_engagement_drops(
+    db: AsyncSession, shop_id: int, session_id: int
+) -> list[dict]:
+    """Detect minutes where comment volume dropped >60% from the previous
+    minute. Useful for the LLM to point at exact moments engagement dipped.
+    Returns at most 3 drops to keep the prompt focused.
+    """
+    result = await db.execute(
+        text("""
+            SELECT date_trunc('minute', received_at) AS minute,
+                   COUNT(*) AS count
+            FROM comments
+            WHERE session_id = :session_id
+              AND shop_id = :shop_id
+              AND is_from_host = false
+            GROUP BY 1
+            ORDER BY 1
+        """),
+        {"session_id": session_id, "shop_id": shop_id},
+    )
+    timeline = [(r.minute, int(r.count)) for r in result.all()]
+
+    drops: list[dict] = []
+    for i in range(1, len(timeline)):
+        prev_min, prev_n = timeline[i - 1]
+        curr_min, curr_n = timeline[i]
+        if prev_n >= 5 and curr_n < prev_n * 0.4:
+            drops.append({
+                "minute": curr_min,
+                "before": prev_n,
+                "after": curr_n,
+            })
+    drops.sort(key=lambda d: d["before"] - d["after"], reverse=True)
+    return drops[:3]
 
 
 # --- Monthly usage summary ---

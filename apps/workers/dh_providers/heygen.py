@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
+from typing import Iterator
 
 import httpx
 
@@ -42,8 +44,19 @@ class HeyGenProvider(DHProvider):
 
     # ------------------------------------------------------------------ http
 
-    def _client(self) -> httpx.Client:
-        return self._http or httpx.Client()
+    @contextmanager
+    def _client(self) -> Iterator[httpx.Client]:
+        """Yield an httpx.Client, closing it if we created it ourselves.
+
+        When a client was injected (tests), yield it as-is — the caller owns
+        its lifecycle. Otherwise open a fresh client as a context manager so
+        the connection pool is released when the method exits.
+        """
+        if self._http is not None:
+            yield self._http
+            return
+        with httpx.Client() as client:
+            yield client
 
     def _headers(self) -> dict:
         return {"X-Api-Key": self._api_key}
@@ -81,12 +94,13 @@ class HeyGenProvider(DHProvider):
             "dimension": {"width": 1280, "height": 720},
         }
 
-        response = self._client().post(
-            f"{HEYGEN_API_URL}/v2/video/generate",
-            headers=self._headers(),
-            json=payload,
-            timeout=60,
-        )
+        with self._client() as client:
+            response = client.post(
+                f"{HEYGEN_API_URL}/v2/video/generate",
+                headers=self._headers(),
+                json=payload,
+                timeout=60,
+            )
         if response.status_code != 200:
             raise RuntimeError(f"HeyGen API error: {response.status_code} {response.text}")
 
@@ -102,12 +116,13 @@ class HeyGenProvider(DHProvider):
         if not self._api_key:
             raise RuntimeError("HEYGEN_API_KEY not configured")
 
-        status_resp = self._client().get(
-            f"{HEYGEN_API_URL}/v1/video_status.get",
-            params={"video_id": job_id},
-            headers=self._headers(),
-            timeout=30,
-        )
+        with self._client() as client:
+            status_resp = client.get(
+                f"{HEYGEN_API_URL}/v1/video_status.get",
+                params={"video_id": job_id},
+                headers=self._headers(),
+                timeout=30,
+            )
         data = status_resp.json()["data"]
         heygen_status = data.get("status")
 
@@ -142,7 +157,8 @@ class HeyGenProvider(DHProvider):
         if response.status != "ready" or not response.video_url:
             return response
 
-        video_bytes = self._client().get(response.video_url, timeout=120).content
+        with self._client() as client:
+            video_bytes = client.get(response.video_url, timeout=120).content
         video_bytes = add_watermark(video_bytes)
         stored_url = save_video_artifact(video_bytes, shop_id=shop_id)
 

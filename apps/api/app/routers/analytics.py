@@ -13,12 +13,15 @@ from app.schemas.analytics import (
     CommentWithSuggestion,
     OverviewStats,
     ProductMention,
+    SessionComparison,
     SessionDetailResponse,
+    SessionInsights,
     SessionListResponse,
     TopQuestion,
     UsageMeterOut,
 )
 from app.services import analytics as svc
+from app.services import session_insights as insights_svc
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -151,6 +154,45 @@ async def session_export(
             "Content-Disposition": f"attachment; filename=session_{session_id}.csv",
         },
     )
+
+
+@router.get(
+    "/sessions/{session_id}/comparison",
+    response_model=SessionComparison,
+)
+async def session_comparison(
+    session_id: int,
+    shop: ShopContext = Depends(get_current_shop),
+    db: AsyncSession = Depends(get_db),
+):
+    session = await svc.get_session_detail(db, shop.shop_id, session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session không tồn tại",
+        )
+    return await svc.get_session_comparison(db, shop.shop_id, session_id)
+
+
+@router.get(
+    "/sessions/{session_id}/insights",
+    response_model=SessionInsights,
+)
+async def session_insights(
+    session_id: int,
+    shop: ShopContext = Depends(get_current_shop),
+    db: AsyncSession = Depends(get_db),
+    refresh: bool = Query(False),
+):
+    result = await insights_svc.generate_session_insights(
+        db, shop.shop_id, session_id, force=refresh
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session không tồn tại",
+        )
+    return result
 
 
 @router.get("/usage", response_model=list[UsageMeterOut])

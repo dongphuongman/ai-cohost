@@ -125,3 +125,43 @@ class CommentWithSuggestion(BaseModel):
     suggestion_text: str | None = None
     suggestion_status: str | None = None
     suggestion_latency_ms: int | None = None
+
+
+# --- Comparison vs 30-day average ---
+
+
+class SessionComparison(BaseModel):
+    """% diff of this session vs the shop's last-30-day average.
+
+    ``None`` for any field means there isn't enough history to compare
+    (e.g. fewer than 5 prior ended sessions).
+    """
+
+    duration: float | None = None
+    comments: float | None = None
+    suggestions: float | None = None
+    adoption: float | None = None
+    sample_size: int = 0
+
+
+# --- AI insights ---
+
+
+class InsightItem(BaseModel):
+    """A single insight card. ``action`` is optional for ``positives`` (wins
+    don't always need a follow-up); ``improvements`` and ``suggestions`` should
+    always have one.
+    """
+
+    title: str
+    detail: str
+    action: str | None = None
+
+
+class SessionInsights(BaseModel):
+    positives: list[InsightItem]
+    improvements: list[InsightItem]
+    suggestions: list[InsightItem]
+    generated_at: datetime
+    cached: bool = False
+    warning: str | None = None

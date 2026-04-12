@@ -219,13 +219,23 @@ def _cache_key(shop_id: int, comment_text: str) -> str:
 
 def _call_llm_with_fallback(
     prompt: str, comment_id: int, session_id: int,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, list[str]]:
     """Call LLM with Gemini Flash primary, DeepSeek V3 fallback.
 
-    Returns (response_text, model_used, provider_used).
+    Returns ``(response_text, model_used, provider_used, chunks)``.
+
+    ORDERING CRITICAL: this function used to publish ``suggestion.stream``
+    chunks to Redis as they arrived from the LLM. It no longer does that.
+    Chunks are buffered in the returned list and the caller must publish
+    them AFTER the suggestion row is committed to Postgres — see the
+    ordering comment in ``_do_generate`` and the 2026-04-12 incident
+    writeup. Publishing before commit lets the host quick-paste the text,
+    the scraper loops the comment back over WS, and
+    ``is_likely_self_reply`` queries ``suggestions`` and finds no row —
+    so the AI reply leaks into "top questions" as if it were a viewer.
     """
-    channel = f"suggestion_stream:{session_id}"
     last_error = None
+    chunks: list[str] = []
 
     # Provider 1: Gemini Flash
     try:
@@ -236,13 +246,9 @@ def _call_llm_with_fallback(
         for chunk in response:
             if chunk.text:
                 full_response += chunk.text
-                _redis.publish(channel, json.dumps({
-                    "type": "suggestion.stream",
-                    "comment_id": comment_id,
-                    "chunk": chunk.text,
-                }))
+                chunks.append(chunk.text)
         if full_response.strip():
-            return full_response, "gemini-2.0-flash", "google"
+            return full_response, "gemini-2.0-flash", "google", chunks
     except Exception as e:
         last_error = e
         logger.warning("Gemini Flash failed for comment %s: %s. Trying DeepSeek...", comment_id, e)
@@ -269,19 +275,14 @@ def _call_llm_with_fallback(
             data = resp.json()
             text_out = data["choices"][0]["message"]["content"]
             if text_out.strip():
-                _redis.publish(channel, json.dumps({
-                    "type": "suggestion.stream",
-                    "comment_id": comment_id,
-                    "chunk": text_out,
-                }))
-                return text_out, "deepseek-chat", "deepseek"
+                return text_out, "deepseek-chat", "deepseek", [text_out]
         except Exception as e:
             last_error = e
             logger.warning("DeepSeek also failed for comment %s: %s", comment_id, e)
 
     # Both failed
     logger.error("All LLM providers failed for comment %s. Last error: %s", comment_id, last_error)
-    return "", "none", "none"
+    return "", "none", "none", []
 
 
 # --- Main task ---
@@ -388,11 +389,16 @@ def _do_generate(comment_id: int, session_id: int, shop_id: int) -> dict:
         # 9. Build prompt
         prompt = _build_prompt(persona, comment_text, products, faqs, history)
 
-        # 10. Call LLM with fallback: Gemini Flash → DeepSeek V3
+        # 10. Call LLM with fallback: Gemini Flash → DeepSeek V3.
+        # Chunks are buffered and published later, AFTER the suggestion row
+        # is committed — see the ordering comment before step 12.
         start_time = time.time()
-        full_response, llm_model_used, llm_provider_used = _call_llm_with_fallback(
-            prompt, comment_id, session_id,
-        )
+        (
+            full_response,
+            llm_model_used,
+            llm_provider_used,
+            stream_chunks,
+        ) = _call_llm_with_fallback(prompt, comment_id, session_id)
         latency_ms = int((time.time() - start_time) * 1000)
 
         if not full_response.strip():
@@ -438,9 +444,34 @@ def _do_generate(comment_id: int, session_id: int, shop_id: int) -> dict:
         )
         db.commit()
 
-        # 12. Publish completion via Redis
+        # 12. Publish stream chunks + completion via Redis.
+        #
+        # ORDERING CRITICAL: persist before publish to prevent a race with
+        # self-reply detection in the WS handler. The sequence must be:
+        #   1) accumulate LLM chunks into full_response  (step 10)
+        #   2) INSERT suggestion row                      (step 11)
+        #   3) db.commit() — flushes the row to Postgres (above)
+        #   4) _redis.publish() stream chunks + complete (below)
+        #
+        # If any event that exposes the AI text to the frontend (stream
+        # chunks OR complete) is published before the commit, the host can
+        # quick-paste the text, the scraper loops the comment back over
+        # WS, and is_likely_self_reply queries the suggestions table and
+        # finds no row — so the AI reply leaks into "top questions" as a
+        # viewer comment.
+        #
+        # Incident 2026-04-12: session 24 comment 769 vs suggestion 429,
+        # observed race window 17ms. Do not reorder these steps.
+        channel = f"suggestion_stream:{session_id}"
+        for chunk_text in stream_chunks:
+            _redis.publish(channel, json.dumps({
+                "type": "suggestion.stream",
+                "comment_id": comment_id,
+                "chunk": chunk_text,
+            }))
+
         _redis.publish(
-            f"suggestion_stream:{session_id}",
+            channel,
             json.dumps({
                 "type": "suggestion.complete",
                 "comment_id": comment_id,

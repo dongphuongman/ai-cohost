@@ -21,7 +21,7 @@ from app.services import ai_generate, faqs as faq_svc, products as product_svc, 
 router = APIRouter(prefix="/products", tags=["products"])
 
 
-@router.get("/", response_model=ProductListResponse)
+@router.get("", response_model=ProductListResponse)
 async def list_products(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -38,7 +38,7 @@ async def list_products(
     )
 
 
-@router.post("/", response_model=ProductResponse, status_code=201)
+@router.post("", response_model=ProductResponse, status_code=201)
 async def create_product(
     data: ProductCreate,
     shop: ShopContext = Depends(get_current_shop),

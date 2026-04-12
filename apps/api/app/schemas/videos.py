@@ -21,8 +21,10 @@ class VideoGenerateRequest(BaseModel):
     avatar_preset: str = Field(default="default_avatar", max_length=200)
     voice_clone_id: int | None = None
     background: str = Field(default="#FFFFFF", max_length=200)
-    # Premium quality flag — Đợt 1 always sends False (no UI toggle yet);
-    # Đợt 2 will expose a checkbox for Agency-plan users.
+    # Premium quality flag — forces HeyGen ($0.40/min) over LiteAvatar.
+    # Đợt 1 has no UI toggle. Regardless of UI, the service layer gates this
+    # on plan tier: only `pro` and `enterprise` shops can set it to True.
+    # Lower tiers get a validation error at generate_video() time.
     prefer_quality: bool = False
 
     @field_validator("text")
