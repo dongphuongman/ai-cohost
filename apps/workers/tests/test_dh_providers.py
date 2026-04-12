@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from dh_providers import (
@@ -181,6 +182,220 @@ class TestLiteAvatarStub:
         assert provider.supports_avatar("linh_female") is True
         assert provider.supports_avatar("custom_user_xyz") is False
         assert provider.supports_avatar("default_avatar") is False
+
+
+# ---------- LiteAvatarProvider HTTP integration ------------------------------
+
+
+class TestLiteAvatarHTTP:
+    """HTTP integration tests for LiteAvatarProvider real implementation.
+
+    The provider uses a sync ``httpx.Client`` (not AsyncClient) because
+    Celery tasks call it directly. Tests inject a MagicMock through the
+    ``http_client`` kwarg so no real network traffic is generated.
+    """
+
+    BASE_URL = "http://lite-avatar:8080"
+
+    def _provider(self, client: MagicMock) -> LiteAvatarProvider:
+        return LiteAvatarProvider(base_url=self.BASE_URL, http_client=client)
+
+    def _ok_response(self, payload: dict, status_code: int = 200) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.json.return_value = payload
+        resp.text = str(payload)
+        return resp
+
+    # --- is_available --------------------------------------------------------
+
+    def test_health_check_success_returns_true(self):
+        client = MagicMock()
+        client.get.return_value = self._ok_response({"status": "ok"})
+        assert self._provider(client).is_available() is True
+        # Must hit /health endpoint
+        called_url = client.get.call_args[0][0]
+        assert called_url == f"{self.BASE_URL}/health"
+
+    def test_health_check_404_returns_false(self):
+        client = MagicMock()
+        client.get.return_value = self._ok_response({}, status_code=404)
+        assert self._provider(client).is_available() is False
+
+    def test_health_check_connection_error_returns_false(self):
+        client = MagicMock()
+        client.get.side_effect = httpx.ConnectError("connection refused")
+        assert self._provider(client).is_available() is False
+
+    def test_health_check_timeout_returns_false(self):
+        client = MagicMock()
+        client.get.side_effect = httpx.ReadTimeout("read timeout")
+        assert self._provider(client).is_available() is False
+
+    # --- supports_avatar -----------------------------------------------------
+
+    def test_supports_avatar_returns_true_for_known(self):
+        provider = LiteAvatarProvider(base_url=self.BASE_URL)
+        for avatar_id in ("linh_female", "nam_male", "huong_female",
+                          "tuan_male", "mai_female"):
+            assert provider.supports_avatar(avatar_id) is True
+
+    def test_supports_avatar_returns_false_for_unknown(self):
+        provider = LiteAvatarProvider(base_url=self.BASE_URL)
+        assert provider.supports_avatar("custom_avatar_xyz") is False
+        assert provider.supports_avatar("") is False
+
+    # --- generate ------------------------------------------------------------
+
+    def test_generate_success_returns_response_with_job_id(self):
+        client = MagicMock()
+        client.post.return_value = self._ok_response(
+            {"job_id": "la-job-abc-123", "status": "queued"}
+        )
+
+        result = self._provider(client).generate(_request())
+
+        assert isinstance(result, GenerateResponse)
+        assert result.provider == "liteavatar"
+        assert result.job_id == "la-job-abc-123"
+        assert result.status == "queued"
+        assert result.cost_usd == 0.0
+        # Must hit /generate endpoint
+        called_url = client.post.call_args[0][0]
+        assert called_url == f"{self.BASE_URL}/generate"
+
+    def test_generate_with_voice_id_logs_warning_and_passes_none(self, caplog):
+        client = MagicMock()
+        client.post.return_value = self._ok_response(
+            {"job_id": "la-1", "status": "queued"}
+        )
+
+        req = GenerateRequest(
+            text="xin chào",
+            avatar_id="linh_female",
+            voice_id="el_voice_42",
+            shop_id=1,
+        )
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="dh_providers.liteavatar"):
+            self._provider(client).generate(req)
+
+        # Warning must mention ElevenLabs not implemented
+        assert any(
+            "ElevenLabs" in rec.message and "el_voice_42" in rec.message
+            for rec in caplog.records
+        )
+
+        # voice_audio_url in payload must be None (worker falls back to gTTS)
+        payload = client.post.call_args[1]["json"]
+        assert payload["voice_audio_url"] is None
+
+    def test_generate_http_error_raises(self):
+        client = MagicMock()
+        err_resp = MagicMock()
+        err_resp.status_code = 500
+        err_resp.text = "Internal Server Error"
+        client.post.return_value = err_resp
+
+        with pytest.raises(RuntimeError, match="500"):
+            self._provider(client).generate(_request())
+
+    def test_generate_includes_all_request_fields_in_payload(self):
+        client = MagicMock()
+        client.post.return_value = self._ok_response(
+            {"job_id": "la-1", "status": "queued"}
+        )
+
+        req = GenerateRequest(
+            text="Xin chào thế giới",
+            avatar_id="nam_male",
+            background="#00FF00",
+            language="vi",
+            shop_id=1,
+        )
+        self._provider(client).generate(req)
+
+        payload = client.post.call_args[1]["json"]
+        assert payload["text"] == "Xin chào thế giới"
+        assert payload["avatar_id"] == "nam_male"
+        assert payload["background"] == "#00FF00"
+        assert payload["language"] == "vi"
+        assert payload["voice_audio_url"] is None
+
+    # --- get_status ----------------------------------------------------------
+
+    def test_get_status_ready_returns_video_url(self):
+        client = MagicMock()
+        client.get.return_value = self._ok_response(
+            {
+                "job_id": "la-1",
+                "status": "ready",
+                "video_url": "storage://lite-avatar/abc.mp4",
+                "duration_seconds": 42,
+                "error": None,
+            }
+        )
+
+        result = self._provider(client).get_status("la-1")
+
+        assert result.status == "ready"
+        assert result.video_url == "storage://lite-avatar/abc.mp4"
+        assert result.duration_seconds == 42
+        assert result.error_message is None
+        assert result.provider == "liteavatar"
+        assert result.cost_usd == 0.0
+        # Must hit /status/{job_id}
+        called_url = client.get.call_args[0][0]
+        assert called_url == f"{self.BASE_URL}/status/la-1"
+
+    def test_get_status_processing_returns_no_url(self):
+        client = MagicMock()
+        client.get.return_value = self._ok_response(
+            {
+                "job_id": "la-1",
+                "status": "processing",
+                "video_url": None,
+                "duration_seconds": None,
+                "error": None,
+            }
+        )
+
+        result = self._provider(client).get_status("la-1")
+
+        assert result.status == "processing"
+        assert result.video_url is None
+        assert result.duration_seconds is None
+        assert result.error_message is None
+
+    def test_get_status_failed_returns_error_message(self):
+        client = MagicMock()
+        client.get.return_value = self._ok_response(
+            {
+                "job_id": "la-1",
+                "status": "failed",
+                "video_url": None,
+                "duration_seconds": None,
+                "error": "LiteAvatar inference crashed: OOM",
+            }
+        )
+
+        result = self._provider(client).get_status("la-1")
+
+        assert result.status == "failed"
+        assert result.error_message == "LiteAvatar inference crashed: OOM"
+        assert result.video_url is None
+
+    def test_get_status_404_raises(self):
+        client = MagicMock()
+        err_resp = MagicMock()
+        err_resp.status_code = 404
+        err_resp.text = "Job not found"
+        client.get.return_value = err_resp
+
+        with pytest.raises(RuntimeError, match="404"):
+            self._provider(client).get_status("unknown-job")
 
 
 # ---------- HeyGenProvider behavior ------------------------------------------

@@ -42,6 +42,44 @@ services:
       - "1025:1025"
       - "8025:8025"
 
+  # Self-hosted digital human worker. Opt-in only — start with:
+  #   docker compose --profile lite-avatar up -d lite-avatar-worker
+  # The profile guard keeps it out of the default `docker compose up` since
+  # it needs to download ~5-8GB of model weights on first boot.
+  lite-avatar-worker:
+    build:
+      context: ../../services/lite-avatar-worker
+      dockerfile: Dockerfile
+    container_name: cohost-lite-avatar
+    ports:
+      # Host 8088 → container 8080. Adminer already owns host 8080.
+      - "8088:8080"
+    volumes:
+      - lite-avatar-models:/app/lite-avatar/weights
+      - lite-avatar-cache:/tmp/lite-avatar-videos
+      - ../../services/lite-avatar-worker/avatars:/app/avatars:ro
+    environment:
+      - LOG_LEVEL=INFO
+      - VIDEO_CACHE_DIR=/tmp/lite-avatar-videos
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 16G
+        reservations:
+          cpus: '4'
+          memory: 8G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    profiles:
+      - lite-avatar
+
 volumes:
   pgdata:
   redisdata:
+  lite-avatar-models:
+  lite-avatar-cache:
