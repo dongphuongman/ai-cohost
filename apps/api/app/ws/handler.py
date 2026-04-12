@@ -146,14 +146,35 @@ def _is_self_reply_match(comment_text: str, suggestion_texts: list[str]) -> bool
     return False
 
 
-async def _fetch_recent_sent_suggestion_texts(
+async def _fetch_recent_suggestion_texts(
     db, session_id: int, *, window_minutes: int = _SELF_REPLY_WINDOW_MINUTES
 ) -> list[str]:
-    """Return texts of suggestions in this session that the host actually sent.
+    """Return texts of every suggestion in this session within the recent window.
 
-    Only ``status='sent'`` qualifies — ``pasted_not_sent`` means the host
-    copied a suggestion via Quick Paste but never clicked Send on Facebook,
-    so it never appears in the chat panel and could not be re-scraped.
+    No status filter on purpose. The earlier version of this query
+    restricted to ``status='sent'`` on the assumption that other states
+    (``pasted_not_sent``, ``suggested``) could not have been delivered to
+    Facebook chat and therefore could not be re-scraped. That assumption
+    turned out to be wrong:
+
+    * ``pasted_not_sent`` is set when the extension's Quick Paste action
+      drops the suggestion text into the FB chat input. The extension
+      has no reliable signal for whether the host then clicks Send in
+      FB's own UI — so this status is really *pasted-and-maybe-sent*.
+      Verified on the 2026-04-12 dataset: 50 viewer comments exact-text
+      matched suggestions whose status was ``pasted_not_sent`` (e.g.
+      session 15, suggestion #267 → comment #460).
+    * ``suggested`` matches happen on a race: the comment re-scrape can
+      arrive over the WS before the extension PATCHes the suggestion's
+      status to ``sent``/``pasted_not_sent``. 11 such matches existed
+      in the same dataset.
+
+    Status is an extension UI state, not a "delivered to Facebook"
+    signal, so we don't gate detection on it. The 5-minute time window
+    plus same-session scope is the actual safety rail: the probability
+    that a viewer types one of the shop's AI suggestions verbatim, in
+    the same session, within 5 minutes of generation, is effectively
+    zero.
 
     Bounded by both the time window and a hard row limit so a runaway
     session can't blow up the per-comment query latency.
@@ -163,7 +184,6 @@ async def _fetch_recent_sent_suggestion_texts(
         select(Suggestion.text_)
         .where(
             Suggestion.session_id == session_id,
-            Suggestion.status == "sent",
             Suggestion.created_at >= cutoff,
         )
         .order_by(Suggestion.created_at.desc())
@@ -181,7 +201,7 @@ async def is_likely_self_reply(db, session_id: int, comment_text: str) -> bool:
     """
     if not comment_text or len(comment_text.strip()) < _SELF_REPLY_MIN_LEN:
         return False
-    recent = await _fetch_recent_sent_suggestion_texts(db, session_id)
+    recent = await _fetch_recent_suggestion_texts(db, session_id)
     if not recent:
         return False
     return _is_self_reply_match(comment_text, recent)

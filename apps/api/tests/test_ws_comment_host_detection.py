@@ -330,7 +330,7 @@ class _FakeDB:
 
 @pytest.fixture
 def patched_fetch(monkeypatch):
-    """Replace _fetch_recent_sent_suggestion_texts with a controllable fake.
+    """Replace _fetch_recent_suggestion_texts with a controllable fake.
 
     Yields a setter the test can use to install per-call return values.
     """
@@ -341,7 +341,7 @@ def patched_fetch(monkeypatch):
         return state["texts"]
 
     monkeypatch.setattr(
-        handler_mod, "_fetch_recent_sent_suggestion_texts", fake_fetch
+        handler_mod, "_fetch_recent_suggestion_texts", fake_fetch
     )
     return state
 
@@ -411,3 +411,142 @@ async def test_is_likely_self_reply_truncated_facebook_render(patched_fetch):
     patched_fetch["texts"] = [full]
     result = await is_likely_self_reply(_FakeDB(), 17, truncated)
     assert result is True
+
+
+# ---------------------------------------------------------------------------
+# 4. Status-agnostic detection — regression for the 2026-04-12 polluted-DB bug
+# ---------------------------------------------------------------------------
+#
+# The first cut of the host-loop fix gated detection on
+# ``suggestions.status = 'sent'``. Backfill against the dev DB caught only
+# 76 of ~137 historical leaks because:
+#
+#   * `pasted_not_sent` is set when the extension's Quick Paste action drops
+#     text into the FB chat input. The extension has no signal for the
+#     subsequent manual Send click, so this status is really
+#     "pasted-and-maybe-sent". 50 such leaks existed.
+#
+#   * `suggested` is the unmodified initial state. Sometimes the comment
+#     re-scrape WS event arrives before the extension PATCHes the status,
+#     leaving real sends with `suggested`. 11 such leaks existed.
+#
+# These tests pin the new contract: the matcher cares about TEXT, not
+# STATUS. The fetch helper hands every recent-window suggestion in the
+# session to the matcher, regardless of state. Concrete regression target
+# is session 15 / suggestion #267 / comment #460 from the 2026-04-12 bug.
+
+
+class TestStatusAgnosticDetection:
+    """The matcher must not gate on suggestion.status.
+
+    These are pure-logic tests on _is_self_reply_match: the matcher takes
+    plain text strings and has no concept of status. The point of the
+    tests is to assert "given a suggestion text that the DB stored under
+    status X, will the matcher catch the re-scrape?" — the answer must
+    be yes for every status, because status is an extension UI state
+    and the live FB chat panel doesn't care about it.
+    """
+
+    def test_self_reply_detected_when_suggestion_status_is_pasted_not_sent(self):
+        """Quick Paste fills the FB chat input. The extension marks the
+        suggestion `pasted_not_sent` because it can't observe the host's
+        manual click on FB's own Send button. But the host DOES click —
+        the text appears in chat and gets re-scraped on the next polling
+        tick. Detection must fire.
+
+        Pinned from session 15 / suggestion #267 / comment #460 in the
+        2026-04-12 dataset.
+        """
+        suggestion_text = (
+            "Dạ đúng rồi chị yêu ơi!💖 KEM MẶT VICTORY NGỌC TRAI TRẮNG DA "
+            "giúp da sáng mịn, đều màu hơn đó ạ!"
+        )
+        # status='pasted_not_sent' is irrelevant to the matcher — it
+        # only sees the text.
+        assert _is_self_reply_match(suggestion_text, [suggestion_text]) is True
+
+    def test_self_reply_detected_when_suggestion_status_is_suggested(self):
+        """Race condition: the comment re-scrape WS event arrives before
+        the extension PATCHes the suggestion status. Real sends can sit
+        at `suggested` for a few hundred ms. Detection must fire on the
+        text alone."""
+        suggestion_text = (
+            "Dạ chị yêu ơi!💖 Bên em luôn đặt chất lượng sản phẩm và sự "
+            "hài lòng của khách hàng lên hàng đầu nha!"
+        )
+        assert _is_self_reply_match(suggestion_text, [suggestion_text]) is True
+
+    def test_self_reply_detected_when_suggestion_status_is_dismissed(self):
+        """Future-proofing: even if a new status like `dismissed` is added
+        to the suggestion lifecycle, the matcher must keep working on
+        text alone. Status is an extension UI signal, not a delivery
+        signal — adding a new state should never silently regress
+        detection."""
+        suggestion_text = (
+            "Dạ chào chị yêu! 🥰 Hôm nay nhà em có deal 32 ảnh 4x6 ép "
+            "plastic chỉ 26k đó ạ!"
+        )
+        assert _is_self_reply_match(suggestion_text, [suggestion_text]) is True
+
+    def test_session_15_id_460_regression(self):
+        """Verbatim regression from the 2026-04-12 polluted dashboard.
+
+        Comment #460 in session 15 was a re-scrape of suggestion #267
+        whose status was `pasted_not_sent`. The first cut of the fix
+        missed it because of the `status='sent'` filter. With status
+        gone from the query, the same text pair must match.
+        """
+        text = (
+            "Dạ đúng rồi chị yêu ơi!💖 KEM MẶT VICTORY NGỌC TRAI TRẮNG DA "
+            "giúp da sáng mịn, đều màu hơn đó ạ!"
+        )
+        # Even mixed in with unrelated suggestions, the matcher must hit.
+        recent = [
+            "Chào shop ơi 🎉",  # unrelated viewer-style noise
+            text,  # the offending re-scrape source
+            "Dạ shop báo giá 350K nha",
+        ]
+        assert _is_self_reply_match(text, recent) is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_helper_does_not_filter_by_status():
+    """The fetch helper must hand the matcher every suggestion in the
+    window regardless of status.
+
+    We don't stand up Postgres for this test. Instead we hand the helper
+    a stub async session whose ``execute`` records the SQLAlchemy
+    statement, then compile that statement to literal SQL and assert
+    the WHERE clause does not mention ``status``. This is a structural
+    check on the query, not a behavioural one — it pins the contract
+    that whoever edits this helper next can't quietly re-add the
+    status filter without a test failure.
+    """
+    captured: dict = {}
+
+    class _StubResult:
+        def all(self):
+            return []
+
+    class _StubSession:
+        async def execute(self, stmt):
+            captured["stmt"] = stmt
+            return _StubResult()
+
+    await handler_mod._fetch_recent_suggestion_texts(_StubSession(), 17)
+
+    stmt = captured["stmt"]
+    # Compile with literal binds so the rendered SQL is human-inspectable.
+    rendered = str(
+        stmt.compile(compile_kwargs={"literal_binds": True})
+    ).lower()
+
+    assert "status" not in rendered, (
+        "The recent-suggestion fetch must not gate on suggestion.status. "
+        "Status is an extension UI state, not a 'delivered to FB' signal — "
+        "see the docstring on _fetch_recent_suggestion_texts for the full "
+        "rationale (2026-04-12 polluted-dashboard regression)."
+    )
+    # Sanity: the query DID still scope by session and time.
+    assert "session_id" in rendered
+    assert "created_at" in rendered

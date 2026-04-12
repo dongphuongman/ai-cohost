@@ -3,8 +3,17 @@
 Re-runs the host-loop self-reply detection from app.ws.handler against every
 existing session in the database. The same matching contract used by the
 live WS path (exact equality + 30-char prefix in either direction, against
-status='sent' suggestions in the same session, no time window for
+ALL suggestions in the same session — no status filter, no time window for
 historical scan) is applied to every viewer comment.
+
+Status filter rationale: dropped on 2026-04-12 after the initial backfill
+caught only 76 of ~137 historical leaks. The earlier ``status='sent'``
+filter assumed ``pasted_not_sent`` and ``suggested`` could not have been
+delivered to FB chat. They can — Quick Paste fills the chat input but the
+extension never sees the host's manual click-Send, and races between the
+re-scrape WS event and the status PATCH leave some real sends with status
+``suggested``. Same-session scope is the actual safety rail. See
+``app.ws.handler._fetch_recent_suggestion_texts`` for the full writeup.
 
 Why this exists
 ---------------
@@ -59,12 +68,16 @@ async def scan() -> list[Match]:
     matches: list[Match] = []
 
     async with async_session() as db:
-        # Sessions that have at least one sent suggestion AND at least one
-        # viewer comment — the only ones where a self-reply leak is possible.
+        # Sessions that have at least one suggestion AND at least one viewer
+        # comment — the only ones where a self-reply leak is possible. No
+        # status filter on suggestions: pasted_not_sent and suggested can
+        # also leak through to FB chat (extension can't observe the host's
+        # manual Send click after Quick Paste, and the re-scrape WS event
+        # can race the status PATCH).
         sessions = await db.execute(text("""
             SELECT DISTINCT s.id
               FROM live_sessions s
-              JOIN suggestions g ON g.session_id = s.id AND g.status = 'sent'
+              JOIN suggestions g ON g.session_id = s.id
               JOIN comments    c ON c.session_id = s.id AND c.is_from_host = false
         """))
         session_ids = [row.id for row in sessions]
@@ -75,7 +88,7 @@ async def scan() -> list[Match]:
         async with async_session() as db:
             sug_rows = await db.execute(text("""
                 SELECT id, text FROM suggestions
-                 WHERE session_id = :s AND status = 'sent'
+                 WHERE session_id = :s
             """), {"s": sid})
             sugs = [(r.id, r.text) for r in sug_rows]
 
