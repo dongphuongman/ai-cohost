@@ -5,6 +5,7 @@ import logging
 import time
 
 import redis.asyncio as aioredis
+import sentry_sdk
 from fastapi import WebSocket, WebSocketDisconnect, Query
 from jose import JWTError
 
@@ -439,6 +440,38 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                     await db.commit()
             except Exception:
                 pass
+    except Exception as exc:
+        # Catch-all for ANY uncaught error inside the message-processing
+        # loop. Without this, exceptions silently kill the WS connection
+        # and never reach Sentry — that's exactly how the 2026-04-12
+        # is_from_host migration drift went undetected (every comment.new
+        # raised UndefinedColumnError, the connection died, the extension's
+        # optimistic UI counter still ticked up, and nobody saw the alert).
+        #
+        # Tag the event so it's easy to filter in Sentry, then re-raise
+        # WebSocketDisconnect-style cleanup so the session is marked
+        # interrupted instead of left as "running" forever.
+        logger.exception("WS handler raised uncaught exception")
+        sentry_sdk.set_tag("ws.user_id", state.user_id)
+        sentry_sdk.set_tag("ws.shop_id", state.shop_id)
+        sentry_sdk.set_tag("ws.session_uuid", state.session_uuid)
+        sentry_sdk.capture_exception(exc)
+
+        if state.pubsub_task:
+            state.pubsub_task.cancel()
+        if state.session_uuid:
+            try:
+                async with async_session() as db:
+                    await session_svc.mark_session_interrupted(db, state.session_uuid)
+                    await db.commit()
+            except Exception:
+                pass
+        # Try to close the socket cleanly so the client gets a real close
+        # frame instead of a TCP RST. Best-effort.
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except Exception:
+            pass
 
 
 async def _listen_suggestions(websocket: WebSocket, state: WSConnectionState) -> None:
